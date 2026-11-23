@@ -37,7 +37,7 @@ backend/app/
     ga.py               AG: torneo k=3, elitismo 5 %, OX/PMX, mutaciones, criterios de parada
     optimizer.py        RF-07 partición por material, RF-10 métricas y comparativa
     validation.py       RNF-04 validador geométrico independiente (bloquea patrones inválidos)
-backend/tests/          22 pruebas (geometría, reglas de negocio, operadores, rendimiento, API, PNG)
+backend/tests/          26 pruebas (geometría, reglas de negocio, operadores, rendimiento, API, PNG)
 frontend/               SPA Vue 3 (vendorizado, funciona sin internet)
 muestras/               CSV de ejemplo para inventario y órdenes
 ```
@@ -83,6 +83,16 @@ muestras/               CSV de ejemplo para inventario y órdenes
 * **Selección de hoja** en inventario heterogéneo: retazos primero; luego la hoja virgen más pequeña que
   cubra el área pendiente; al final, mejora local que sustituye cada hoja por otra más pequeña si contiene
   exactamente las mismas piezas.
+* **Búsqueda local por hoja** (al finalizar): cada hoja se re-acomoda con 5 órdenes de inserción ×
+  reglas de ajuste (BAF/BSSF/BLSF, o BL en modo libre) × reglas de partición de guillotina, y se conserva
+  la variante con menor merma neta. Nunca empeora una hoja.
+* **Calibración (demo, 2026-11-23)**: merma neta 4.76 % frente a un piso físico de 3.46 % (kerf 3 mm +
+  refilado 10 mm, inevitable) → sólo ≈1.3 pp son evitables y corresponden a tiras más angostas que el
+  retazo mínimo que ninguna pieza de la cola puede ocupar. Variar población, cruce, mutación o tiempo
+  (hasta 120 s) no cambia el resultado (±0.1 pp): el AG converge. **La merma 0 % es físicamente
+  imposible**: aun con kerf y refilado en 0 quedaría ≈1.5 %. Las palancas reales son de proceso: retazo
+  mínimo (200×100 → merma evitable 0.6 pp, si la planta realmente reutiliza esas tiras), refilado y
+  mezcla de medidas en la cola.
 * **Garantía**: el AG nunca entrega una solución peor que la línea base FIFO (se compara al final).
 * **Confirmación de corrida**: descuenta hojas, da de alta los retazos como lotes nuevos (con costo
   proporcional), registra las piezas cortadas por orden (órdenes *cortadas* o *parciales*) y marca como

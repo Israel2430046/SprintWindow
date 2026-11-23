@@ -20,11 +20,17 @@ Rect = tuple  # (x, y, w, h)
 
 
 class GuillotineBin:
-    __slots__ = ("W", "H", "free")
+    """``fit``: baf (Best Area Fit), bssf (Best Short Side Fit), blsf (Best Long Side Fit).
+    ``split``: maxarea (sobrante continuo mayor), minarea, horizontal, vertical."""
+    __slots__ = ("W", "H", "free", "fit", "split")
 
-    def __init__(self, W: float, H: float):
+    VARIANTS = [(f, s) for f in ("baf", "bssf", "blsf") for s in ("maxarea", "minarea", "horizontal", "vertical")]
+
+    def __init__(self, W: float, H: float, fit: str = "baf", split: str = "maxarea"):
         self.W = W
         self.H = H
+        self.fit = fit
+        self.split = split
         self.free: list[Rect] = [(0.0, 0.0, W, H)] if W > EPS and H > EPS else []
 
     def can_fit(self, w: float, h: float) -> bool:
@@ -36,22 +42,37 @@ class GuillotineBin:
     def insert(self, w: float, h: float):
         """Coloca un rectángulo (ya inflado). Devuelve (x, y) o None."""
         best_i = -1
-        best_area = best_short = float("inf")
+        best_a = best_b = float("inf")
+        fit = self.fit
         for i, (fx, fy, fw, fh) in enumerate(self.free):
             if fw + EPS >= w and fh + EPS >= h:
-                area = fw * fh - w * h          # Best Area Fit
-                short = min(fw - w, fh - h)     # desempate: Best Short Side Fit
-                if area < best_area - EPS or (abs(area - best_area) <= EPS and short < best_short):
-                    best_i, best_area, best_short = i, area, short
+                area = fw * fh - w * h
+                short = min(fw - w, fh - h)
+                long_ = max(fw - w, fh - h)
+                if fit == "baf":
+                    a, b = area, short
+                elif fit == "bssf":
+                    a, b = short, long_
+                else:
+                    a, b = long_, short
+                if a < best_a - EPS or (abs(a - best_a) <= EPS and b < best_b):
+                    best_i, best_a, best_b = i, a, b
         if best_i < 0:
             return None
         fx, fy, fw, fh = self.free.pop(best_i)
         rw, bh = fw - w, fh - h
-        # Regla de partición "Maximizar área": se elige el corte que deja el
-        # sobrante continuo más grande (favorece retazos recuperables, RN-06).
+        # Regla de partición. Por defecto "Maximizar área": se elige el corte
+        # que deja el sobrante continuo más grande (favorece retazos, RN-06).
         horiz_best = max(fw * bh, rw * h)   # corte horizontal a todo lo ancho
         vert_best = max(rw * fh, w * bh)    # corte vertical a todo lo alto
-        if horiz_best >= vert_best:
+        sp = self.split
+        if sp == "maxarea":
+            horizontal = horiz_best >= vert_best
+        elif sp == "minarea":
+            horizontal = horiz_best < vert_best
+        else:
+            horizontal = sp == "horizontal"
+        if horizontal:
             bottom = (fx, fy + h, fw, bh)
             right = (fx + w, fy, rw, h)
         else:
@@ -149,11 +170,15 @@ def subtract_rect(free: list[Rect], used: Rect) -> list[Rect]:
 
 
 class MaxRectsBin:
-    __slots__ = ("W", "H", "free")
+    """``fit``: bl (Bottom-Left), baf, bssf, blsf."""
+    __slots__ = ("W", "H", "free", "fit")
 
-    def __init__(self, W: float, H: float):
+    VARIANTS = [(f, None) for f in ("bl", "baf", "bssf", "blsf")]
+
+    def __init__(self, W: float, H: float, fit: str = "bl", split=None):
         self.W = W
         self.H = H
+        self.fit = fit
         self.free: list[Rect] = [(0.0, 0.0, W, H)] if W > EPS and H > EPS else []
 
     def can_fit(self, w: float, h: float) -> bool:
@@ -165,12 +190,20 @@ class MaxRectsBin:
     def insert(self, w: float, h: float):
         best = None
         best_y = best_x = float("inf")
+        fit = self.fit
         for fx, fy, fw, fh in self.free:
             if fw + EPS >= w and fh + EPS >= h:
-                # Bottom-Left: menor "techo" (y + h), luego menor x.
-                top = fy + h
-                if top < best_y - EPS or (abs(top - best_y) <= EPS and fx < best_x):
-                    best, best_y, best_x = (fx, fy), top, fx
+                if fit == "bl":
+                    # Bottom-Left: menor "techo" (y + h), luego menor x.
+                    a, b = fy + h, fx
+                elif fit == "baf":
+                    a, b = fw * fh - w * h, min(fw - w, fh - h)
+                elif fit == "bssf":
+                    a, b = min(fw - w, fh - h), max(fw - w, fh - h)
+                else:
+                    a, b = max(fw - w, fh - h), min(fw - w, fh - h)
+                if a < best_y - EPS or (abs(a - best_y) <= EPS and b < best_x):
+                    best, best_y, best_x = (fx, fy), a, b
         if best is None:
             return None
         self.free = subtract_rect(self.free, (best[0], best[1], w, h))

@@ -72,9 +72,10 @@ class Decoder:
             self.order_weight[p.order_id] = p.priority_weight
 
     # ------------------------------------------------------------------ decode
-    def _new_bin(self, lot: SheetLot, instance: int) -> _Bin:
+    def _new_bin(self, lot: SheetLot, instance: int, variant=None) -> _Bin:
         iw, ih = inner_size(lot, self.pp)
-        return _Bin(lot, instance, self.packer_cls(iw, ih))
+        packer = self.packer_cls(iw, ih) if variant is None else self.packer_cls(iw, ih, *variant)
+        return _Bin(lot, instance, packer)
 
     def _choose_lot(self, p: Piece, rot: bool, remaining: dict, need_area: float):
         orients = _orients(p, rot)
@@ -145,12 +146,13 @@ class Decoder:
 
         if finalize:
             self._downsize(bins, remaining)
+            self._polish(bins)
         res = Decoded(bins, unplaced)
         self._evaluate(res)
         return res
 
-    def _repack(self, lot: SheetLot, placed: list, instance: int):
-        b = self._new_bin(lot, instance)
+    def _repack(self, lot: SheetLot, placed: list, instance: int, variant=None):
+        b = self._new_bin(lot, instance, variant)
         k = self.pp.kerf
         for uid, _x, _y, w, h, r in placed:
             p = self.pieces[uid]
@@ -175,7 +177,14 @@ class Decoder:
             for lot in self.virgin_lots:
                 if lot.area >= b.lot.area - EPS or remaining[lot.lot_id] <= 0:
                     continue
-                nb = self._repack(lot, b.placed, 0)
+                nb = None
+                for order in self._orderings(b.placed):
+                    for variant in self.packer_cls.VARIANTS:
+                        nb = self._repack(lot, order, 0, variant)
+                        if nb is not None:
+                            break
+                    if nb is not None:
+                        break
                 if nb is not None:
                     remaining[lot.lot_id] -= 1
                     remaining[b.lot.lot_id] += 1
@@ -186,6 +195,41 @@ class Decoder:
         for b in bins:
             counter[b.lot.lot_id] = counter.get(b.lot.lot_id, 0) + 1
             b.instance = counter[b.lot.lot_id]
+
+    def _orderings(self, placed: list) -> list:
+        """Órdenes de inserción candidatos para re-acomodar una hoja."""
+        dims = lambda t: (t[3], t[4])
+        return [
+            placed,
+            sorted(placed, key=lambda t: (-dims(t)[1], -dims(t)[0])),       # alto desc
+            sorted(placed, key=lambda t: (-dims(t)[0], -dims(t)[1])),       # ancho desc
+            sorted(placed, key=lambda t: -dims(t)[0] * dims(t)[1]),         # área desc
+            sorted(placed, key=lambda t: -max(dims(t))),                    # lado mayor desc
+        ]
+
+    def _waste(self, b: _Bin) -> float:
+        used = sum(w * h for _u, _x, _y, w, h, _r in b.placed)
+        off = sum(r[2] * r[3] for r in self.bin_offcuts(b))
+        return b.lot.area - used - off
+
+    def _polish(self, bins: list) -> None:
+        """Búsqueda local por hoja: re-acomoda las mismas piezas con varias
+        combinaciones (orden de inserción × regla de ajuste × regla de partición)
+        y conserva la que deja menos merma neta, es decir, la que concentra el
+        sobrante en retazos recuperables (RN-06). Nunca empeora una hoja."""
+        for i, b in enumerate(bins):
+            best, best_w = b, self._waste(b)
+            if best_w <= EPS:
+                continue
+            for order in self._orderings(b.placed):
+                for variant in self.packer_cls.VARIANTS:
+                    nb = self._repack(b.lot, order, b.instance, variant)
+                    if nb is None:
+                        continue
+                    w = self._waste(nb)
+                    if w < best_w - 1.0:          # mejora de al menos 1 mm²
+                        best, best_w = nb, w
+            bins[i] = best
 
     # ---------------------------------------------------------------- fitness
     def bin_offcuts(self, b: _Bin) -> list:

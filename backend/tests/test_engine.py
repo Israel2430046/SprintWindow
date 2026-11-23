@@ -200,3 +200,23 @@ def test_performance_200_pieces_50_sheets():
     res = run_ga(sub, ProcessParams(), GAParams(time_limit_s=25, seed=1))
     assert time.perf_counter() - t <= 30
     assert not res.decoded.unplaced
+
+
+@pytest.mark.parametrize("mode", ["guillotina", "libre"])
+@pytest.mark.parametrize("directional", [False, True])
+def test_polish_never_worse_and_valid(mode, directional):
+    """La búsqueda local por hoja conserva piezas, reglas y nunca sube la merma."""
+    sub = make_sub(directional=directional, seed=5)
+    pp = ProcessParams(cut_mode=mode, kerf=3, trim=10)
+    dec = Decoder(sub, pp)
+    chrom = seed_chromosomes(sub, pp.tolerance_window)[0]
+    raw = dec.decode(chrom, finalize=False)
+    dec._downsize(raw.bins, {l.lot_id: 0 for l in sub.lots})   # mismas hojas que finalize
+    before = [(sorted(t[0] for t in b.placed), dec._waste(b)) for b in raw.bins]
+    dec._polish(raw.bins)
+    for (uids, w0), b in zip(before, raw.bins):
+        assert sorted(t[0] for t in b.placed) == uids
+        assert dec._waste(b) <= w0 + 1e-6
+    _res, sheets = sheets_of(sub, pp, chrom)
+    for s in sheets:
+        assert validate_sheet(s) == []
