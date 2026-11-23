@@ -1,0 +1,12 @@
+numero_orden,cliente,tipo_persiana,ancho_mm,alto_mm,cantidad,color,textura,espesor_mm,prioridad
+OP-1001,Constructora Norte,vertical,1800,2100,2,Blanco,Liso,3.0,Normal
+OP-1002,Hotel Plaza,panel_japones,2400,2300,1,Nogal,Veta madera,3.0,Urgente
+OP-1003,Oficinas Delta,enrollable,1500,1600,3,Blanco,Liso,3.0,Normal
+OP-1004,Residencial Lomas,vertical,2200,1900,1,Nogal,Veta madera,3.0,Normal
+OP-1005,Clínica San José,panel_japones,3000,2400,1,Blanco,Liso,3.0,Normal
+OP-1006,Depto. Roma 12,enrollable,1100,1400,2,Gris,Grabado lineal,3.0,Normal
+OP-1008,Restaurante Mar,enrollable,1150,1900,2,Arena,Texturizado,3.0,Normal
+OP-1009,Constructora Norte,vertical,1200,2300,2,Gris,Grabado lineal,3.0,Normal
+OP-1010,Hotel Plaza,enrollable,900,1800,4,Nogal,Veta madera,3.0,Normal
+OP-1011,Colegio Andes,panel_japones,3600,2500,1,Arena,Texturizado,3.0,Normal
+OP-1012,Oficinas Delta,vertical,1500,2000,1,Blanco,Liso,3.0,Urgente

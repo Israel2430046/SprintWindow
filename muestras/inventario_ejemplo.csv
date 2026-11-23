@@ -1,0 +1,9 @@
+codigo_lote,alto_mm,ancho_mm,espesor_mm,color,textura,direccionalidad_veta,cantidad,costo_unitario,es_retazo
+BL-122x244,2440,1220,3.0,Blanco,Liso,No,12,850,No
+BL-150x300,3000,1500,3.0,Blanco,Liso,No,6,1290,No
+BL-RET-01,900,800,3.0,Blanco,Liso,No,1,205,Si
+BL-RET-02,1300,600,3.0,Blanco,Liso,No,1,225,Si
+NG-122x244,2440,1220,3.0,Nogal,Veta madera,Si,8,1100,No
+NG-122x300,3000,1220,3.0,Nogal,Veta madera,Si,4,1350,No
+GR-122x244,2440,1220,3.0,Gris,Grabado lineal,Si,6,980,No
+AR-122x244,2440,1220,3.0,Arena,Texturizado,No,6,920,No

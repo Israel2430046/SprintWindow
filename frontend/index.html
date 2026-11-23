@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SprintWindow · Optimización de Corte</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app" v-cloak>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">▦</span>
+      <div>
+        <strong>SprintWindow</strong>
+        <small>Optimización de corte y planeación (Nesting 2D)</small>
+      </div>
+    </div>
+    <nav>
+      <button v-for="t in tabs" :key="t.id" :class="{active: tab===t.id}" @click="go(t.id)">{{ t.label }}</button>
+    </nav>
+    <button class="btn primary big" :disabled="running" @click="startRun" title="Ejecuta el Algoritmo Genético sobre la cola actual">
+      {{ running ? 'Optimizando…' : '⚡ Optimizar' }}
+    </button>
+  </header>
+
+  <div class="toasts">
+    <div v-for="t in toasts" :key="t.id" :class="['toast', t.kind]">{{ t.msg }}</div>
+  </div>
+
+  <main>
+    <!-- ======================================================= OPTIMIZAR -->
+    <section v-if="tab==='plan'">
+      <div class="row between">
+        <h1>Planeación de corte</h1>
+        <div class="muted">{{ activeOrders.length }} órdenes en cola · {{ totalSheets }} hojas y {{ offcutCount }} retazos en inventario</div>
+      </div>
+
+      <div v-if="!activeOrders.length && !lots.length && !run" class="empty card">
+        <p>No hay datos todavía. Capture inventario y órdenes, o cargue un conjunto de demostración.</p>
+        <button class="btn" @click="loadDemo">Cargar datos de demostración</button>
+      </div>
+
+      <div v-if="running" class="card">
+        <div class="row between">
+          <strong>Ejecutando Algoritmo Genético · {{ runId }}</strong>
+          <button class="btn small" @click="cancelRun">Detener</button>
+        </div>
+        <div class="progress"><div :style="{width: (progress.avance||0)*100 + '%'}"></div></div>
+        <div class="muted" v-if="progress.material">
+          Grupo {{ progress.grupo }}/{{ progress.grupos }} · {{ progress.material }} · generación {{ progress.generacion }} · F(x) = {{ progress.fitness }}
+        </div>
+      </div>
+
+      <template v-if="run && run.result">
+        <div class="card">
+          <div class="row between wrap">
+            <div>
+              <h2>Corrida {{ run.id }} <span :class="['badge', run.status]">{{ run.status }}</span></h2>
+              <div class="muted">{{ run.result.created_at }} · cómputo {{ run.result.tiempo_total_s }} s ·
+                modo {{ run.result.parametros.proceso.modo_corte }} · kerf {{ run.result.parametros.proceso.kerf_mm }} mm</div>
+            </div>
+            <div class="row gap">
+              <a class="btn primary big" :href="'/api/runs/'+run.id+'/zip'">⬇ Descargar planos (.zip)</a>
+              <button v-if="run.status==='simulada'" class="btn success" @click="confirmRun">✔ Confirmar orden de corte</button>
+              <button v-if="run.status==='simulada'" class="btn ghost" @click="discardRun">Descartar</button>
+            </div>
+          </div>
+
+          <h3>Métricas proyectadas (RF-10)</h3>
+          <div class="kpis">
+            <div class="kpi"><span>Hojas consumidas</span><b>{{ M.hojas }}</b><em>base {{ B.hojas }}</em></div>
+            <div class="kpi good"><span>Aprovechamiento global</span><b>{{ pct(M.aprovechamiento) }}</b><em>base {{ pct(B.aprovechamiento) }}</em></div>
+            <div class="kpi bad"><span>Merma neta</span><b>{{ pct(M.merma) }}</b><em>base {{ pct(B.merma) }}</em></div>
+            <div class="kpi green"><span>Retazo recuperable</span><b>{{ pct(M.retazo) }}</b><em>base {{ pct(B.retazo) }}</em></div>
+            <div class="kpi"><span>Órdenes cubiertas</span><b>{{ M.ordenes_cubiertas }}/{{ M.ordenes_total }}</b>
+              <em>{{ M.ordenes_parciales }} parciales · {{ M.ordenes_pendientes }} pendientes</em></div>
+            <div class="kpi"><span>Costo estimado de merma</span><b>${{ money(M.costo_merma) }}</b><em>base ${{ money(B.costo_merma) }}</em></div>
+          </div>
+          <p class="note" v-if="run.result.reduccion_merma !== null">
+            Comparativa contra la línea base (FIFO estricto sin optimizar):
+            <b :class="run.result.reduccion_merma >= 0 ? 'txt-good':'txt-bad'">{{ run.result.reduccion_merma >= 0 ? 'reducción' : 'aumento' }} de merma neta de {{ pct(Math.abs(run.result.reduccion_merma)) }}</b>.
+          </p>
+          <div v-for="w in run.result.advertencias" class="alert warn">⚠ {{ w }}</div>
+        </div>
+
+        <div class="card">
+          <h3>Subproblemas por material (RF-07)</h3>
+          <table class="tbl">
+            <thead><tr><th>Material</th><th>Veta</th><th>Piezas</th><th>Hojas</th><th>Aprov.</th><th>Merma</th><th>Retazo</th>
+              <th>Generaciones</th><th>Parada</th><th>Tiempo</th><th>Convergencia F(x)</th></tr></thead>
+            <tbody>
+              <tr v-for="g in run.result.grupos">
+                <td><b>{{ g.material }}</b></td>
+                <td>{{ g.directional ? '↕ direccional' : 'uniforme' }}</td>
+                <td>{{ g.piezas }}</td><td>{{ g.metricas.hojas }}</td>
+                <td>{{ pct(g.metricas.aprovechamiento) }}</td><td>{{ pct(g.metricas.merma) }}</td><td>{{ pct(g.metricas.retazo) }}</td>
+                <td>{{ g.generaciones }}</td><td>{{ g.criterio_parada }}</td><td>{{ g.tiempo_s }} s</td>
+                <td><svg class="spark" viewBox="0 0 160 36" preserveAspectRatio="none"><polyline :points="spark(g.historial)" /></svg></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="row between wrap">
+            <h3>Patrones de corte ({{ run.result.hojas.length }} hojas, en secuencia de corte)</h3>
+            <label class="muted"><input type="checkbox" v-model="showLabels"> etiquetas</label>
+          </div>
+          <div class="sheets">
+            <div v-for="s in run.result.hojas" :key="s.seq" class="sheet-card">
+              <div class="sheet-head">
+                <b>#{{ s.seq }} · {{ s.sheet_id }}</b>
+                <span v-if="s.is_offcut" class="badge retazo">retazo</span>
+              </div>
+              <div class="muted small">{{ s.w }}×{{ s.h }} mm · {{ s.color }} / {{ s.texture }} {{ s.directional ? '↕' : '' }}</div>
+              <svg :view-box.camel="'0 0 '+s.w+' '+s.h" class="sheet-svg" @click="openSheet(s)">
+                <defs>
+                  <pattern id="pm" width="40" height="40" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <rect width="40" height="40" fill="#eceef1"/><line x1="0" y1="0" x2="0" y2="40" stroke="#a3a8b0" stroke-width="8"/></pattern>
+                  <pattern id="pr" width="50" height="50" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)">
+                    <rect width="50" height="50" fill="#dcf3de"/><line x1="0" y1="0" x2="0" y2="50" stroke="#2ea043" stroke-width="10"/></pattern>
+                </defs>
+                <rect x="0" y="0" :width="s.w" :height="s.h" fill="url(#pm)" stroke="#1c2128" stroke-width="8"/>
+                <rect v-for="o in s.offcuts" :x="o.x" :y="o.y" :width="o.w" :height="o.h" fill="url(#pr)" stroke="#2ea043" stroke-width="6"/>
+                <g v-for="p in s.placements">
+                  <rect :x="p.x" :y="p.y" :width="p.w" :height="p.h" :fill="orderColor(p.order_id)" stroke="#333" stroke-width="3">
+                    <title>{{ p.order_number }} · {{ p.blind_label }} · {{ p.piece_name }} {{ p.nominal_w }}×{{ p.nominal_h }} mm{{ p.rotated ? ' · rotada 90°' : '' }}</title>
+                  </rect>
+                  <text v-if="showLabels" :x="p.x+p.w/2" :y="p.y+p.h/2" :font-size="labelSize(p)" text-anchor="middle" dominant-baseline="middle"
+                        :transform="p.h > p.w*1.6 ? 'rotate(-90 '+(p.x+p.w/2)+' '+(p.y+p.h/2)+')' : null">{{ p.order_number }}{{ p.rotated ? ' ↻' : '' }}</text>
+                </g>
+              </svg>
+              <div class="sheet-foot">
+                <span class="txt-good">{{ pct(s.metrics.aprovechamiento) }} aprov.</span>
+                <span class="txt-bad">{{ pct(s.metrics.merma) }} merma</span>
+                <span>{{ s.metrics.piezas }} pz</span>
+                <a :href="'/api/runs/'+run.id+'/sheets/'+s.seq+'.png?download=true'" title="Descargar PNG">PNG ⬇</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Cobertura de órdenes</h3>
+          <table class="tbl">
+            <thead><tr><th>#</th><th>Orden</th><th>Cliente</th><th>Tipo</th><th>Prioridad</th><th>Piezas</th><th>Hojas</th><th>Estado</th></tr></thead>
+            <tbody>
+              <tr v-for="(o,i) in run.result.ordenes">
+                <td>{{ i+1 }}</td><td><span class="dot" :style="{background: orderColor(o.order_id)}"></span>{{ o.order_number }}</td>
+                <td>{{ o.client }}</td><td>{{ blindTypes[o.blind_type] }}</td>
+                <td><span :class="['badge', o.priority==='Urgente'?'urgente':'']">{{ o.priority }}</span></td>
+                <td>{{ o.piezas_colocadas }}/{{ o.piezas_total }}</td><td>{{ o.hojas.join(', ') }}</td>
+                <td><span :class="['badge', o.estado]">{{ o.estado }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <template v-if="run.result.pendientes.length">
+            <h4>Piezas sin asignar ({{ run.result.pendientes.length }})</h4>
+            <table class="tbl compact">
+              <thead><tr><th>Orden</th><th>Pieza</th><th>Medida</th><th>Material</th><th>Motivo</th></tr></thead>
+              <tbody><tr v-for="p in groupedPending"><td>{{ p.order_number }}</td><td>{{ p.piece_name }} ×{{ p.n }}</td><td>{{ p.w }}×{{ p.h }}</td><td>{{ p.material }}</td><td>{{ p.reason }}</td></tr></tbody>
+            </table>
+          </template>
+        </div>
+      </template>
+    </section>
+
+    <!-- ========================================================= ÓRDENES -->
+    <section v-if="tab==='orders'">
+      <div class="row between wrap">
+        <h1>Cola de órdenes de producción</h1>
+        <div class="row gap">
+          <a class="btn ghost" href="/api/orders/template.csv">Plantilla CSV</a>
+          <label class="btn">Importar órdenes (.csv/.xlsx)<input type="file" accept=".csv,.xlsx" hidden @change="importFile($event,'orders')"></label>
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h3>{{ orderForm.id ? 'Editar orden ' + orderForm.order_number : 'Nueva orden' }}</h3>
+          <form @submit.prevent="saveOrder" class="form">
+            <div class="fields">
+              <label>Nº de orden<input v-model.trim="orderForm.order_number" required></label>
+              <label>Cliente / lote<input v-model.trim="orderForm.client"></label>
+              <label>Tipo de persiana
+                <select v-model="orderForm.blind_type"><option v-for="(l,k) in blindTypes" :value="k">{{ l }}</option></select></label>
+              <label>Prioridad<select v-model="orderForm.priority"><option>Normal</option><option>Urgente</option></select></label>
+              <template v-if="orderForm.blind_type!=='manual'">
+                <label>Ancho final (mm)<input type="number" step="0.1" min="1" v-model.number="orderForm.width" required></label>
+                <label>Alto final (mm)<input type="number" step="0.1" min="1" v-model.number="orderForm.height" required></label>
+              </template>
+              <label>Cantidad (persianas)<input type="number" min="1" v-model.number="orderForm.quantity" required></label>
+              <label>Color<input v-model.trim="orderForm.color" list="colors" required></label>
+              <label>Textura<input v-model.trim="orderForm.texture" list="textures" required></label>
+              <label>Espesor (mm)<input type="number" step="0.1" min="0.1" v-model.number="orderForm.thickness" required></label>
+            </div>
+            <div v-if="orderForm.blind_type==='manual'" class="manual">
+              <div class="row between"><b>Piezas a medida (por persiana)</b><button type="button" class="btn small" @click="orderForm.manual_pieces.push({nombre:'',ancho:null,alto:null,cantidad:1})">+ pieza</button></div>
+              <div v-for="(mp,i) in orderForm.manual_pieces" class="row gap mp">
+                <input placeholder="Nombre" v-model="mp.nombre">
+                <input type="number" placeholder="Ancho" v-model.number="mp.ancho" step="0.1" min="0.1" required>
+                <input type="number" placeholder="Alto" v-model.number="mp.alto" step="0.1" min="0.1" required>
+                <input type="number" placeholder="Cant." v-model.number="mp.cantidad" min="1" required>
+                <button type="button" class="btn small ghost" @click="orderForm.manual_pieces.splice(i,1)">✕</button>
+              </div>
+            </div>
+            <div class="despiece">
+              <b>Despiece automático (RF-06)</b>
+              <div v-if="despieceErr" class="txt-bad small">{{ despieceErr }}</div>
+              <table v-else-if="despiece.length" class="tbl compact"><thead><tr><th>Pieza</th><th>Ancho</th><th>Alto</th><th>Cant.</th></tr></thead>
+                <tbody><tr v-for="p in despiece"><td>{{ p.nombre }}</td><td>{{ p.ancho }}</td><td>{{ p.alto }}</td><td>{{ p.cantidad }}</td></tr></tbody></table>
+              <div v-else class="muted small">Capture medidas para ver las piezas a cortar.</div>
+            </div>
+            <div class="row gap">
+              <button class="btn primary">{{ orderForm.id ? 'Guardar cambios' : '+ Agregar a la cola' }}</button>
+              <button v-if="orderForm.id" type="button" class="btn ghost" @click="resetOrder">Cancelar</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="row between">
+            <h3>Cola activa ({{ activeOrders.length }})</h3>
+            <span class="muted small">Arrastre para reordenar · RN-04 FIFO</span>
+          </div>
+          <div v-if="impact" class="impact">
+            <b>Impacto en la planeación (heurística FIFO rápida):</b>
+            {{ impact.metricas.hojas }} hojas · aprov. {{ pct(impact.metricas.aprovechamiento) }} ·
+            {{ impact.metricas.ordenes_cubiertas }}/{{ impact.metricas.ordenes_total }} órdenes cubiertas
+          </div>
+          <ul class="queue">
+            <li v-for="(o,i) in activeOrders" :key="o.id" draggable="true"
+                @dragstart="dragIdx=i" @dragover.prevent="dragOver=i" @dragleave="dragOver=null" @drop="dropAt(i)"
+                :class="{over: dragOver===i, urgent: o.priority==='Urgente'}">
+              <span class="handle">⋮⋮</span>
+              <span class="pos">{{ i+1 }}</span>
+              <div class="qinfo">
+                <div><b>{{ o.order_number }}</b> · {{ o.client }} <span v-if="o.priority==='Urgente'" class="badge urgente">Urgente</span>
+                  <span v-if="o.status==='parcial'" class="badge parcial">parcial</span></div>
+                <div class="muted small">{{ blindTypes[o.blind_type] }} · {{ o.blind_type!=='manual' ? o.width+'×'+o.height+' mm · ' : '' }}×{{ o.quantity }} ·
+                  {{ o.color }}/{{ o.texture }}/{{ o.thickness }} mm · {{ o.piezas_pendientes }} pz
+                  <span v-if="impactOf(o.id)" :class="['badge', impactOf(o.id).estado]">{{ impactOf(o.id).estado }}</span></div>
+              </div>
+              <div class="qbtns">
+                <button class="btn small ghost" :disabled="i===0" @click="move(o,'up')" title="Subir">▲</button>
+                <button class="btn small ghost" :disabled="i===activeOrders.length-1" @click="move(o,'down')" title="Bajar">▼</button>
+                <button class="btn small ghost" @click="editOrder(o)" title="Editar">✎</button>
+                <button class="btn small ghost" @click="deleteOrder(o)" title="Eliminar">🗑</button>
+              </div>
+            </li>
+          </ul>
+          <div v-if="!activeOrders.length" class="muted">La cola está vacía.</div>
+          <details v-if="doneOrders.length" class="done">
+            <summary>Órdenes cortadas ({{ doneOrders.length }})</summary>
+            <div v-for="o in doneOrders" class="small muted">{{ o.order_number }} · {{ o.client }} · {{ blindTypes[o.blind_type] }}</div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====================================================== INVENTARIO -->
+    <section v-if="tab==='inventory'">
+      <div class="row between wrap">
+        <h1>Inventario de hojas de PVC</h1>
+        <div class="row gap">
+          <a class="btn ghost" href="/api/lots/template.csv">Plantilla CSV</a>
+          <label class="btn">Importar inventario (.csv/.xlsx)<input type="file" accept=".csv,.xlsx" hidden @change="importFile($event,'lots')"></label>
+        </div>
+      </div>
+      <div class="card">
+        <h3>{{ lotForm.id ? 'Editar lote ' + lotForm.code : 'Alta de lote / retazo' }}</h3>
+        <form @submit.prevent="saveLot" class="form">
+          <div class="fields wide">
+            <label>Código de lote<input v-model.trim="lotForm.code" required></label>
+            <label>Alto (mm) · sentido veta<input type="number" step="0.1" min="1" v-model.number="lotForm.height" required></label>
+            <label>Ancho (mm)<input type="number" step="0.1" min="1" v-model.number="lotForm.width" required></label>
+            <label>Espesor / calibre (mm)<input type="number" step="0.1" min="0.1" v-model.number="lotForm.thickness" required></label>
+            <label>Color<input v-model.trim="lotForm.color" list="colors" required></label>
+            <label>Textura<input v-model.trim="lotForm.texture" list="textures" required></label>
+            <label>Cantidad disponible<input type="number" min="0" v-model.number="lotForm.quantity" required></label>
+            <label>Costo unitario (opcional)<input type="number" step="0.01" min="0" v-model.number="lotForm.unit_cost"></label>
+            <label class="check"><input type="checkbox" v-model="lotForm.directional"> Veta direccional (no rotar)</label>
+            <label class="check"><input type="checkbox" v-model="lotForm.is_offcut"> Es retazo (consumir primero)</label>
+          </div>
+          <div class="row gap">
+            <button class="btn primary">{{ lotForm.id ? 'Guardar cambios' : '+ Registrar' }}</button>
+            <button v-if="lotForm.id" type="button" class="btn ghost" @click="resetLot">Cancelar</button>
+          </div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="row between wrap">
+          <h3>Existencias ({{ lots.length }} lotes)</h3>
+          <input class="search" placeholder="Filtrar…" v-model="lotFilter">
+        </div>
+        <table class="tbl">
+          <thead><tr><th>Código</th><th>Tipo</th><th>Ancho × Alto (mm)</th><th>Espesor</th><th>Color</th><th>Textura</th><th>Veta</th><th>Cant.</th><th>Costo</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="l in filteredLots" :key="l.id" :class="{zero: l.quantity===0}">
+              <td><b>{{ l.code }}</b></td>
+              <td><span :class="['badge', l.is_offcut ? 'retazo' : '']">{{ l.is_offcut ? 'Retazo' : 'Hoja' }}</span></td>
+              <td>{{ l.width }} × {{ l.height }}</td><td>{{ l.thickness }}</td><td>{{ l.color }}</td><td>{{ l.texture }}</td>
+              <td>{{ l.directional ? '↕ Sí' : 'No' }}</td><td>{{ l.quantity }}</td><td>{{ l.unit_cost != null ? '$'+money(l.unit_cost) : '—' }}</td>
+              <td class="nowrap"><button class="btn small ghost" @click="editLot(l)">✎</button><button class="btn small ghost" @click="deleteLot(l)">🗑</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ========================================================= CORRIDAS -->
+    <section v-if="tab==='runs'">
+      <h1>Historial de corridas</h1>
+      <div class="card">
+        <table class="tbl">
+          <thead><tr><th>Corrida</th><th>Fecha</th><th>Estado</th><th>Hojas</th><th>Aprov.</th><th>Merma</th><th>Órdenes</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="r in runs">
+              <td><b>{{ r.id }}</b></td><td>{{ r.created_at }}</td><td><span :class="['badge', r.status]">{{ r.status }}</span></td>
+              <template v-if="r.metricas"><td>{{ r.metricas.hojas }}</td><td>{{ pct(r.metricas.aprovechamiento) }}</td><td>{{ pct(r.metricas.merma) }}</td>
+                <td>{{ r.metricas.ordenes_cubiertas }}/{{ r.metricas.ordenes_total }}</td></template>
+              <template v-else><td colspan="4" class="muted">{{ r.error || '—' }}</td></template>
+              <td class="nowrap"><button v-if="r.metricas" class="btn small" @click="viewRun(r.id)">Ver</button>
+                <a v-if="r.metricas" class="btn small ghost" :href="'/api/runs/'+r.id+'/zip'">ZIP</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================================================== CONFIGURACIÓN -->
+    <section v-if="tab==='settings' && settings">
+      <div class="row between"><h1>Parámetros de proceso (RF-09)</h1>
+        <div class="row gap"><button class="btn ghost" @click="resetSettings">Restaurar valores</button><button class="btn primary" @click="saveSettings">Guardar</button></div></div>
+      <div class="grid2">
+        <div class="card">
+          <h3>Proceso de corte</h3>
+          <div class="fields">
+            <label>Grosor de corte · kerf (mm)<input type="number" step="0.1" min="0" v-model.number="settings.proceso.kerf_mm"></label>
+            <label>Refilado perimetral (mm)<input type="number" step="0.5" min="0" v-model.number="settings.proceso.refilado_mm"></label>
+            <label>Retazo mínimo · largo Lₘᵢₙ (mm)<input type="number" min="0" v-model.number="settings.proceso.retazo_min_largo_mm"></label>
+            <label>Retazo mínimo · ancho Aₘᵢₙ (mm)<input type="number" min="0" v-model.number="settings.proceso.retazo_min_ancho_mm"></label>
+            <label>Geometría de corte (RN-05)<select v-model="settings.proceso.modo_corte">
+              <option value="guillotina">Guillotina (seccionadora)</option><option value="libre">Anidado libre (router CNC)</option></select></label>
+            <label>Ventana de tolerancia de cola (RN-04)<input type="number" min="0" v-model.number="settings.proceso.ventana_tolerancia"></label>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Función de aptitud</h3>
+          <p class="formula">min F(x) = w₁·Σ(A<sub>merma</sub>/A<sub>hoja</sub>) + w₂·Σ P<sub>i</sub>·ΔT<sub>i</sub> − w₃·ΣA<sub>retazo</sub>/ΣA<sub>hoja</sub> + w<sub>p</sub>·pendientes</p>
+          <div class="fields">
+            <label>w₁ · merma<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w1_merma"></label>
+            <label>w₂ · prioridad de cola vs. ahorro<input type="number" step="0.01" min="0" v-model.number="settings.pesos.w2_cola"></label>
+            <label>w₃ · bonificación de retazos<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w3_retazo"></label>
+            <label>wₚ · piezas sin hoja<input type="number" step="1" min="0" v-model.number="settings.pesos.w_pendientes"></label>
+            <label>Pᵢ orden Urgente<input type="number" step="0.5" min="0" v-model.number="settings.pesos.peso_urgente"></label>
+            <label>Pᵢ orden Normal<input type="number" step="0.5" min="0" v-model.number="settings.pesos.peso_normal"></label>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Algoritmo Genético</h3>
+          <div class="fields">
+            <label>Tamaño de población<input type="number" min="4" v-model.number="settings.ga.poblacion"></label>
+            <label>Gₘₐₓ (generaciones)<input type="number" min="1" v-model.number="settings.ga.generaciones_max"></label>
+            <label>Estancamiento X (gen. sin mejora)<input type="number" min="1" v-model.number="settings.ga.estancamiento"></label>
+            <label>Tₘₐₓ (s)<input type="number" step="1" min="1" v-model.number="settings.ga.tiempo_max_s"></label>
+            <label>Cruce<select v-model="settings.ga.cruce"><option>OX</option><option>PMX</option></select></label>
+            <label>Prob. de cruce<input type="number" step="0.05" min="0" max="1" v-model.number="settings.ga.prob_cruce"></label>
+            <label>Prob. de mutación<input type="number" step="0.05" min="0" max="1" v-model.number="settings.ga.prob_mutacion"></label>
+            <label>Elitismo (fracción)<input type="number" step="0.01" min="0" max="0.5" v-model.number="settings.ga.elitismo"></label>
+            <label>Torneo k<input type="number" min="2" v-model.number="settings.ga.torneo_k"></label>
+            <label>Semilla (vacío = aleatoria)<input type="number" v-model.number="settings.ga.semilla"></label>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Holguras de ensamble · despiece (RF-06)</h3>
+          <div v-for="(vals, tipo) in settings.holguras" class="holg">
+            <b>{{ blindTypes[tipo] }}</b>
+            <div class="fields">
+              <label v-for="(v,k) in vals">{{ k.replaceAll('_',' ') }}<input type="number" step="0.5" v-model.number="settings.holguras[tipo][k]"></label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <datalist id="colors"><option v-for="c in knownColors" :value="c"></option></datalist>
+  <datalist id="textures"><option v-for="t in knownTextures" :value="t"></option></datalist>
+
+  <div v-if="modalSheet" class="modal" @click.self="modalSheet=null">
+    <div class="modal-body">
+      <div class="row between"><b>Plano PNG · hoja #{{ modalSheet.seq }} · {{ modalSheet.sheet_id }}</b>
+        <div class="row gap"><a class="btn small" :href="'/api/runs/'+run.id+'/sheets/'+modalSheet.seq+'.png?download=true'">Descargar PNG</a>
+          <button class="btn small ghost" @click="modalSheet=null">Cerrar ✕</button></div></div>
+      <img :src="'/api/runs/'+run.id+'/sheets/'+modalSheet.seq+'.png'" alt="Plano de corte">
+    </div>
+  </div>
+</div>
+<script src="vendor/vue.global.prod.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
