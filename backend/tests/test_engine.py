@@ -253,3 +253,25 @@ def test_theoretical_bound_above_actual():
     tb = theoretical_bound(sub, pp)
     teorico = tb["area_piezas"] / tb["area_hojas_min"]
     assert actual <= teorico < 1.0
+
+
+@pytest.mark.parametrize("mode", ["guillotina", "libre"])
+@pytest.mark.parametrize("directional", [False, True])
+def test_memetic_ga_layout_valid(mode, directional):
+    """El patrón que entrega el AG memético (gen de heurística + búsqueda local
+    lamarckiana) es válido y contiene todas las piezas exactamente una vez."""
+    pp = ProcessParams(cut_mode=mode)
+    sub = make_sub(n_orders=10, per=4, directional=directional, seed=5)
+    res = run_ga(sub, pp, GAParams(population=16, max_generations=20, time_limit_s=5, seed=3))
+    uids = sorted([t[0] for b in res.decoded.bins for t in b.placed] + res.decoded.unplaced)
+    assert uids == list(range(len(sub.pieces)))
+    assert res.decoded.fitness <= res.baseline.fitness + 1e-9
+    dec = Decoder(sub, pp)
+    for ps in dec.to_sheets(res.decoded):
+        pls = [{"order_number": sub.pieces[pl.piece_uid].order_number, "x": pl.x, "y": pl.y, "w": pl.w,
+                "h": pl.h, "rotated": pl.rotated, "nominal_w": sub.pieces[pl.piece_uid].w,
+                "nominal_h": sub.pieces[pl.piece_uid].h} for pl in ps.placements]
+        sheet = {"sheet_id": ps.lot.code, "w": ps.lot.w, "h": ps.lot.h, "kerf": pp.kerf, "trim": pp.trim,
+                 "directional": ps.lot.directional, "cut_mode": mode, "placements": pls,
+                 "offcuts": [{"x": r[0], "y": r[1], "w": r[2], "h": r[3]} for r in ps.offcuts]}
+        assert validate_sheet(sheet) == []
