@@ -1,0 +1,13 @@
+numero_orden,cliente,tipo_persiana,ancho_mm,alto_mm,cantidad,color,textura,espesor_mm,prioridad
+OP-2001,Hotel Plaza,enrollable,1200,1800,3,Blanco,Liso,3.0,Urgente
+OP-2002,Oficinas Delta,vertical,2000,2200,2,Blanco,Liso,3.0,Normal
+OP-2003,Residencial Lomas,panel_japones,2600,2300,1,Nogal,Veta madera,3.0,Normal
+OP-2004,Clínica San José,enrollable,900,1500,4,Gris,Grabado lineal,3.0,Normal
+OP-2005,Restaurante Mar,vertical,1600,2100,1,Arena,Texturizado,3.0,Urgente
+OP-2006,Colegio Andes,enrollable,1400,1700,2,Arena,Texturizado,3.0,Normal
+OP-2007,Casa Fam. Ortiz,horizontal,1000,1200,2,Blanco,Liso,3.0,Normal
+OP-2008,Constructora Norte,enrollable,800,1600,5,Nogal,Veta madera,3.0,Normal
+OP-2009,Depto. Roma 12,vertical,1300,2000,1,Gris,Grabado lineal,3.0,Normal
+OP-2010,Hotel Plaza,panel_japones,2100,2350,1,Blanco,Liso,3.0,Normal
+OP-2011,Café Central,enrollable,1100,1400,3,Cafe,Liso,3.0,Normal
+OP-2012,Café Central,vertical,1800,2000,1,Cafe,Liso,3.0,Urgente
