@@ -344,6 +344,8 @@ def build_zip(result: dict, png_getter, created_at: str | None = None) -> bytes:
             f"Aprovechamiento global: {mg['aprovechamiento'] * 100:.2f} %",
             f"Merma neta: {mg['merma'] * 100:.2f} %",
             f"Retazo recuperable: {mg['retazo'] * 100:.2f} %",
+            f"Aprovechamiento teórico máximo (cota kerf + refilado): {mg.get('aprovechamiento_teorico', 0) * 100:.2f} %",
+            f"Adherencia a la cola: {mg.get('adherencia_cola', 1) * 100:.1f} %",
             f"Órdenes cubiertas: {mg['ordenes_cubiertas']} / {mg['ordenes_total']}"
             f" (parciales {mg['ordenes_parciales']}, pendientes {mg['ordenes_pendientes']})",
         ]

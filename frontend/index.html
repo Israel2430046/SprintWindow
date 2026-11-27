@@ -76,11 +76,16 @@
             <div class="kpi green"><span>Retazo recuperable</span><b>{{ pct(M.retazo) }}</b><em>base {{ pct(B.retazo) }}</em></div>
             <div class="kpi"><span>Órdenes cubiertas</span><b>{{ M.ordenes_cubiertas }}/{{ M.ordenes_total }}</b>
               <em>{{ M.ordenes_parciales }} parciales · {{ M.ordenes_pendientes }} pendientes</em></div>
+            <div class="kpi"><span>Adherencia a la cola (KPI &gt; 95 %)</span><b>{{ pct(M.adherencia_cola) }}</b><em>base {{ pct(B.adherencia_cola) }}</em></div>
             <div class="kpi"><span>Costo estimado de merma</span><b>${{ money(M.costo_merma) }}</b><em>base ${{ money(B.costo_merma) }}</em></div>
           </div>
           <p class="note" v-if="run.result.reduccion_merma !== null">
             Comparativa contra la línea base (FIFO estricto sin optimizar):
-            <b :class="run.result.reduccion_merma >= 0 ? 'txt-good':'txt-bad'">{{ run.result.reduccion_merma >= 0 ? 'reducción' : 'aumento' }} de merma neta de {{ pct(Math.abs(run.result.reduccion_merma)) }}</b>.
+            <template v-if="run.result.reduccion_desperdicio_total != null">
+              <b :class="run.result.reduccion_desperdicio_total >= 0 ? 'txt-good':'txt-bad'">{{ run.result.reduccion_desperdicio_total >= 0 ? 'reducción' : 'aumento' }} del material no aprovechado de {{ pct(Math.abs(run.result.reduccion_desperdicio_total)) }}</b>
+              ({{ B.hojas - M.hojas }} hojas menos) y
+            </template>
+            <b :class="run.result.reduccion_merma >= 0 ? 'txt-good':'txt-bad'">{{ run.result.reduccion_merma >= 0 ? 'reducción' : 'aumento' }} de merma neta (mm², sin retazos) de {{ pct(Math.abs(run.result.reduccion_merma)) }}</b>.
           </p>
           <div v-for="w in run.result.advertencias" class="alert warn">⚠ {{ w }}</div>
         </div>
@@ -348,11 +353,12 @@
         </div>
         <div class="card">
           <h3>Función de aptitud</h3>
-          <p class="formula">min F(x) = w₁·[A<sub>merma</sub> + (1 − w₃)·A<sub>retazo</sub>] / A<sub>piezas</sub> + w₂·Σ P<sub>i</sub>·ΔT<sub>i</sub> + w<sub>p</sub>·pendientes − ε·Σu<sub>j</sub>²/n</p>
+          <p class="formula">min F(x) = w₁·Σ<sub>j</sub>(A<sub>merma,j</sub>/A<sub>hoja,j</sub>) + w₂·Σ P<sub>i</sub>·ΔT<sub>i</sub> − w₃·ΣA<sub>retazo,k</sub>/ΣA<sub>piezas</sub> + w<sub>p</sub>·pendientes</p>
+          <p class="note">A<sub>merma,j</sub> = área de la hoja j no utilizada en piezas (glosario ERS); el retazo se bonifica aparte con w₃.</p>
           <div class="fields">
             <label>w₁ · merma<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w1_merma"></label>
             <label>w₂ · prioridad de cola vs. ahorro<input type="number" step="0.01" min="0" v-model.number="settings.pesos.w2_cola"></label>
-            <label>w₃ · valor de recuperación del retazo (0–0.9)<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w3_retazo"></label>
+            <label>w₃ · bonificación de retazos<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w3_retazo"></label>
             <label>wₚ · piezas sin hoja<input type="number" step="1" min="0" v-model.number="settings.pesos.w_pendientes"></label>
             <label>Pᵢ orden Urgente<input type="number" step="0.5" min="0" v-model.number="settings.pesos.peso_urgente"></label>
             <label>Pᵢ orden Normal<input type="number" step="0.5" min="0" v-model.number="settings.pesos.peso_normal"></label>

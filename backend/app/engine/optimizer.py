@@ -140,12 +140,17 @@ def _finish(m: dict) -> dict:
     m["retazo"] = (m["area_retazos"] / a) if a else 0.0
     m["merma"] = (1 - m["aprovechamiento"] - m["retazo"]) if a else 0.0
     m["merma_bruta"] = (1 - m["aprovechamiento"]) if a else 0.0
+    m["area_merma"] = max(0.0, a - m["area_piezas"] - m["area_retazos"])
+    m["area_no_aprovechada"] = max(0.0, a - m["area_piezas"])
+    n = m.get("ordenes_en_cola", 0)
+    m["adherencia_cola"] = (m.get("ordenes_a_tiempo", 0) / n) if n else 1.0
     return m
 
 
 def _sum(ms: list[dict]) -> dict:
     keys = ["hojas", "area_hojas", "area_piezas", "area_retazos", "costo_merma",
-            "piezas_colocadas", "piezas_pendientes", "cota_area_hojas", "cota_area_piezas"]
+            "piezas_colocadas", "piezas_pendientes", "cota_area_hojas", "cota_area_piezas",
+            "ordenes_a_tiempo", "ordenes_en_cola"]
     return {k: sum(m.get(k, 0.0) for m in ms) for k in keys}
 
 
@@ -202,6 +207,9 @@ def optimize(orders: list[dict], lots: list[dict], settings: dict, run_id: str,
         done_pieces += len(sub.pieces)
 
         mo, mb = _metrics(dec, best), _metrics(dec, baseline)
+        for m, d in ((mo, best), (mb, baseline)):
+            m["ordenes_a_tiempo"] = d.components.get("ordenes_a_tiempo", 0)
+            m["ordenes_en_cola"] = d.components.get("ordenes_en_cola", 0)
         tb = theoretical_bound(sub, pp)
         for m in (mo, mb):
             m["cota_area_hojas"], m["cota_area_piezas"] = tb["area_hojas_min"], tb["area_piezas"]
@@ -279,11 +287,18 @@ def optimize(orders: list[dict], lots: list[dict], settings: dict, run_id: str,
                            "piezas_total": tot_by_order[oid], "piezas_colocadas": placed_opt.get(oid, 0),
                            "hojas": sorted(sheets_by_order.get(oid, set()))})
 
+    # KPI 1 de la ERS: se comparan ÁREAS (mm²), no porcentajes. Al consumir
+    # menos hojas el sobrante total baja aunque su porcentaje sobre una base
+    # menor pueda subir, así que comparar porcentajes engañaba.
     ahorro = None
-    if bm["merma"] > 0:
-        ahorro = (bm["merma"] - gm["merma"]) / bm["merma"]
+    if bm["area_merma"] > 0:
+        ahorro = (bm["area_merma"] - gm["area_merma"]) / bm["area_merma"]
+    ahorro_total = None
+    if bm["area_no_aprovechada"] > 0:
+        ahorro_total = (bm["area_no_aprovechada"] - gm["area_no_aprovechada"]) / bm["area_no_aprovechada"]
     return {
         "run_id": run_id, "metricas": gm, "linea_base": bm, "reduccion_merma": ahorro,
+        "reduccion_desperdicio_total": ahorro_total,
         "grupos": groups_out, "hojas": sheets_out, "ordenes": orders_out, "pendientes": pending_out,
         "advertencias": warnings, "tiempo_total_s": round(time.perf_counter() - t0, 2),
         "parametros": {"proceso": settings["proceso"], "pesos": settings["pesos"], "ga": settings["ga"]},

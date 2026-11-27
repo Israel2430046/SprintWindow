@@ -132,50 +132,104 @@ class GAResult:
 def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float | None = None,
            progress: Callable[[int, float], None] | None = None,
            cancelled: Callable[[], bool] | None = None) -> GAResult:
+    """AG memético con gen de heurística.
+
+    Individuo = (permutación de genes (id_pieza, rotada), h), donde ``h`` es el
+    índice de la regla de acomodo del decodificador (ajuste × partición). La
+    permutación evoluciona con OX/PMX + swap/inversión/rotación como dicta la
+    ERS; ``h`` se hereda de uno de los padres y muta con baja probabilidad, de
+    modo que el AG también aprende *qué regla de acomodo* conviene a cada mezcla
+    de piezas.
+
+    Fase memética (lamarckiana): cada vez que mejora el mejor individuo se le
+    aplica la búsqueda local (vaciado de hojas, cambio a retazos, re-acomodo) y
+    el patrón mejorado se reescribe como cromosoma (piezas en el orden hoja por
+    hoja), que reemplaza al peor de la población. El mejor patrón pulido visto
+    durante toda la corrida es el que se entrega.
+    """
     t0 = time.perf_counter()
     T = gp.time_limit_s if time_limit is None else time_limit
     rng = random.Random(gp.seed)
     dec = Decoder(sub, pp)
     n = len(sub.pieces)
     rotatable = [p.rotatable for p in sub.pieces]
+    n_var = len(dec.packer_cls.VARIANTS)
     cache: dict[tuple, float] = {}
 
     seeds = seed_chromosomes(sub, pp.tolerance_window)
     baseline = dec.decode(seeds[0], finalize=True, eliminate=False)    # línea base FIFO sin optimizar
 
+    def key(ind) -> tuple:
+        return (tuple(ind[0]), ind[1])
+
+    def raw(ind) -> Decoded:
+        return dec.decode(ind[0], variant=ind[1], best_fit=True)
+
     def evaluate(pop: list) -> list[float]:
-        keys = [tuple(c) for c in pop]
-        todo = [i for i, k in enumerate(keys) if k not in cache]
-        # evita evaluar duplicados dentro de la misma generación
+        keys = [key(c) for c in pop]
         uniq: dict[tuple, int] = {}
-        for i in todo:
-            uniq.setdefault(keys[i], i)
-        idxs = list(uniq.values())
-        vals = [dec.decode(pop[i]).fitness for i in idxs]
-        for i, v in zip(idxs, vals):
-            cache[keys[i]] = v
+        for i, k in enumerate(keys):
+            if k not in cache:
+                uniq.setdefault(k, i)       # evita evaluar duplicados
+        for k, i in uniq.items():
+            cache[k] = raw(pop[i]).fitness
         return [cache[k] for k in keys]
 
+    # Población inicial: cada semilla heurística × varias reglas de acomodo.
     size = max(4, gp.population)
-    pop = [list(s) for s in seeds][:size]
+    pop = []
+    for s in seeds:
+        for v in range(n_var):
+            pop.append((list(s), v))
+    fits0 = evaluate(pop)
+    pop = [pop[i] for i in sorted(range(len(pop)), key=lambda i: fits0[i])][: max(2, size // 2)]
     while len(pop) < size:
-        base = rng.choice(seeds)
+        base, v = rng.choice(pop[: max(2, size // 4)])
         c = list(base)
         if rng.random() < 0.25:
             rng.shuffle(c)          # diversidad: algunos individuos aleatorios
+            v = rng.randrange(n_var)
         else:
             for _ in range(rng.randint(1, max(1, n // 10))):
                 c = mutate(c, rotatable, rng)
-        pop.append(c)
+        pop.append((c, v))
 
     fits = evaluate(pop)
     n_elite = max(1, math.ceil(gp.elitism * size))
     best_i = min(range(size), key=lambda i: fits[i])
     best, best_fit = pop[best_i], fits[best_i]
     history = [round(best_fit, 6)]
+
+    # Mejor patrón pulido (búsqueda local) encontrado en toda la corrida.
+    ls_deadline = t0 + max(T, 1.0)
+    final_best: Decoded | None = None
+    final_ind = best
+    ls_done: set = set()
+
+    def local_search(ind) -> None:
+        nonlocal final_best, final_ind, pop, fits
+        k = key(ind)
+        if k in ls_done or time.perf_counter() > ls_deadline:
+            return
+        ls_done.add(k)
+        d = dec.decode(ind[0], finalize=True, deadline=ls_deadline, variant=ind[1], best_fit=True)
+        if final_best is None or d.fitness < final_best.fitness - 1e-12:
+            final_best, final_ind = d, ind
+        # Lamarck: el patrón mejorado vuelve a la población como cromosoma.
+        child = ([(t[0], bool(t[5])) for b in d.bins for t in b.placed]
+                 + [(u, False) for u in d.unplaced], ind[1])
+        if key(child) != k and len(child[0]) == n:
+            f = evaluate([child])[0]
+            worst = max(range(len(pop)), key=lambda i: fits[i])
+            if f < fits[worst]:
+                pop[worst], fits[worst] = child, f
+
+    local_search(best)
+
     stagn = 0
     gen = 0
     stop = "generaciones"
+    cx = order_crossover if gp.crossover.upper() == "OX" else pmx_crossover
     while True:
         if gen >= gp.max_generations:
             stop = "G_max"
@@ -199,50 +253,36 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
             p1 = tournament(pop, fits, gp.tournament_k, rng)
             p2 = tournament(pop, fits, gp.tournament_k, rng)
             if rng.random() < gp.p_crossover:
-                cx = order_crossover if gp.crossover.upper() == "OX" else pmx_crossover
-                child = cx(p1, p2, rng)
+                perm = cx(p1[0], p2[0], rng)
+                v = p1[1] if rng.random() < 0.5 else p2[1]
             else:
-                child = list(p1)
+                perm, v = list(p1[0]), p1[1]
             if rng.random() < gp.p_mutation:
-                child = mutate(child, rotatable, rng)
-            new_pop.append(child)
+                perm = mutate(perm, rotatable, rng)
+                if rng.random() < 0.15:
+                    v = rng.randrange(n_var)        # mutación del gen de heurística
+            new_pop.append((perm, v))
         pop = new_pop
         fits = evaluate(pop)
         gi = min(range(size), key=lambda i: fits[i])
         if fits[gi] < best_fit - 1e-9:
             best, best_fit = pop[gi], fits[gi]
             stagn = 0
+            local_search(best)
         else:
             stagn += 1
         history.append(round(best_fit, 6))
         if progress:
             progress(gen, best_fit)
 
-    # Post-optimización: la búsqueda local (vaciado de hojas, reducción a
-    # retazos y re-acomodo) se aplica al mejor individuo y a otros élites
-    # distintos mientras quede tiempo; distintos órdenes de corte llevan a
-    # distintos óptimos locales.
-    deadline = t0 + max(T, 1.0)
-    finals = [best]
-    seen = {tuple(best)}
-    for i in sorted(range(len(pop)), key=lambda i: fits[i]):
-        if len(finals) >= 4:
-            break
-        key = tuple(pop[i])
-        if key not in seen:
-            seen.add(key)
-            finals.append(pop[i])
-    for s in seeds:
-        if tuple(s) not in seen and len(finals) < 6:
-            seen.add(tuple(s))
-            finals.append(s)
-    decoded = None
-    for c in finals:
-        if decoded is not None and time.perf_counter() > deadline:
-            break
-        d = dec.decode(c, finalize=True, deadline=deadline)
-        if decoded is None or d.fitness < decoded.fitness - 1e-12:
-            decoded, best = d, c
+    # Pulido final de otros élites distintos mientras quede tiempo: distintos
+    # órdenes de corte llevan a distintos óptimos locales.
+    for i in sorted(range(len(pop)), key=lambda i: fits[i])[:4]:
+        local_search(pop[i])
+    for s in seeds[1:]:
+        local_search((s, best[1]))
+    decoded = final_best if final_best is not None else dec.decode(best[0], finalize=True, variant=best[1])
+    best_perm = final_ind[0]
     if baseline.fitness < decoded.fitness:   # nunca entregar algo peor que la línea base
-        decoded, best = baseline, seeds[0]
-    return GAResult(best, decoded, baseline, history, gen, time.perf_counter() - t0, stop, len(cache))
+        decoded, best_perm = baseline, seeds[0]
+    return GAResult(best_perm, decoded, baseline, history, gen, time.perf_counter() - t0, stop, len(cache))

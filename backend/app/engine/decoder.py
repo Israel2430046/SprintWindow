@@ -105,7 +105,11 @@ class Decoder:
         return fitting[-1]
 
     def decode(self, chrom: list, finalize: bool = False, deadline: float | None = None,
-               eliminate: bool = True) -> Decoded:
+               eliminate: bool = True, variant: int | None = None, best_fit: bool = False) -> Decoded:
+        """``variant``: índice en ``packer_cls.VARIANTS`` (regla de ajuste/partición)
+        que usa el empaquetador de cada hoja; ``None`` = regla por defecto.
+        ``best_fit``: la pieza va a la hoja abierta *más llena* donde quepa
+        (en lugar de la primera), lo que concentra piezas y vacía las últimas."""
         pp = self.pp
         k = pp.kerf
         pieces = self.pieces
@@ -118,15 +122,20 @@ class Decoder:
         for i in range(len(chrom) - 1, -1, -1):
             suffix[i] = suffix[i + 1] + pieces[chrom[i][0]].area
 
+        var = None if variant is None else self.packer_cls.VARIANTS[variant % len(self.packer_cls.VARIANTS)]
+        load: dict[int, float] = {}
         for idx, (uid, rot) in enumerate(chrom):
             p = pieces[uid]
             done = False
+            order = (sorted(bins, key=lambda b: -load[id(b)] / (b.packer.W * b.packer.H))
+                     if best_fit and len(bins) > 1 else bins)
             for r in _orients(p, rot):
                 w, h = _dims(p, r)
-                for b in bins:
+                for b in order:
                     pos = b.packer.insert(w + k, h + k)
                     if pos is not None:
                         b.placed.append((uid, pos[0], pos[1], w, h, r))
+                        load[id(b)] += (w + k) * (h + k)
                         done = True
                         break
                 if done:
@@ -139,11 +148,12 @@ class Decoder:
                 continue
             remaining[lot.lot_id] -= 1
             used_count[lot.lot_id] = used_count.get(lot.lot_id, 0) + 1
-            b = self._new_bin(lot, used_count[lot.lot_id])
+            b = self._new_bin(lot, used_count[lot.lot_id], var)
             w, h = _dims(p, r)
             pos = b.packer.insert(w + k, h + k)
             assert pos is not None
             b.placed.append((uid, pos[0], pos[1], w, h, r))
+            load[id(b)] = (w + k) * (h + k)
             bins.append(b)
 
         if finalize:
@@ -356,24 +366,26 @@ class Decoder:
                                disjoint=(pp.cut_mode == "guillotina"))
 
     def _evaluate(self, res: Decoded) -> None:
-        """Aptitud (a minimizar), normalizada por el área total de piezas:
+        """Función de aptitud de la ERS (sección 4.2), a minimizar:
 
-        F = w1·[A_merma + (1 − w3)·A_retazo] / A_piezas
-            + w2·Σ P_i·ΔT_i + w_p·pendientes − ε·Σ u_j² / n
+        F(x) = w1·Σ_j (A_merma,j / A_hoja,j) + w2·Σ_i P_i·ΔT_i − w3·Σ_k A_retazo,k
+               + w_p·pendientes
 
-        * Todo el material consumido que no se convierte en pieza cuesta: la
-          merma completa y el retazo sólo parcialmente (w3 = valor de
-          recuperación del retazo, 0 ≤ w3 < 1). Con la fórmula anterior el
-          retazo *restaba*, lo que premiaba abrir hojas casi vacías.
-        * El término −ε·Σu²/n (u = aprovechamiento de cada hoja) es el
-          desempate clásico de bin packing: entre soluciones con el mismo
-          consumo prefiere concentrar piezas y dejar una hoja casi vacía, lo
-          que da al AG un gradiente hacia eliminar hojas completas.
+        * A_merma,j: área de la hoja j que no se utiliza en piezas (glosario
+          ERS: "porcentaje de área de una hoja que no es utilizada"). Incluye el
+          retazo; por eso cada hoja abierta suma su fracción no utilizada y el
+          AG es empujado a consumir menos hojas.
+        * Σ A_retazo,k se normaliza por el área total de piezas (constante del
+          subproblema) para que w3 sea adimensional. Con las mismas hojas el
+          término de merma es fijo, de modo que w3 sólo decide *cómo* se
+          consolida el sobrante (retazos grandes vs. desperdicio fragmentado),
+          tal como pide la ERS, sin premiar abrir hojas.
+        * w_p·pendientes: penalización por piezas sin hoja (RF-10).
         """
         pp = self.pp
         pieces = self.pieces
+        merma_sum = 0.0
         sheet_area = used_area = offcut_area = 0.0
-        fill_sq = 0.0
         completion: dict[int, int] = {}
         for bi, b in enumerate(res.bins):
             a = b.lot.area
@@ -384,11 +396,10 @@ class Decoder:
                 if completion.get(oid, -1) < bi:
                     completion[oid] = bi
             off = sum(r[2] * r[3] for r in self.bin_offcuts(b))
+            merma_sum += max(0.0, a - used) / a
             sheet_area += a
             used_area += used
             offcut_area += off
-            fill_sq += (used / a) ** 2
-        merma_area = max(0.0, sheet_area - used_area - offcut_area)
         pending = 0.0
         never = len(res.bins) + 1
         for uid in res.unplaced:
@@ -401,18 +412,22 @@ class Decoder:
         # cola, descontando la ventana de tolerancia de agrupamiento (RN-04).
         orders = sorted(completion, key=lambda o: (completion[o], self.order_rank[o]))
         delay = 0.0
+        on_time = 0
         for new_rank, oid in enumerate(orders):
             d = new_rank - self.order_rank[oid] - pp.tolerance_window
             if d > 0:
                 delay += self.order_weight[oid] * d
-        w3 = min(max(pp.w3, 0.0), 0.9)       # un retazo nunca vale tanto como no consumir la hoja
-        consumo = (merma_area + (1.0 - w3) * offcut_area) / self.total_piece_area
-        compact = (fill_sq / len(res.bins)) if res.bins else 0.0
-        fitness = pp.w1 * consumo + pp.w2 * delay + pp.w_pending * pending - 0.02 * compact
+            else:
+                on_time += 1
+        retazo = offcut_area / self.total_piece_area
+        fitness = pp.w1 * merma_sum + pp.w2 * delay - pp.w3 * retazo + pp.w_pending * pending
         res.fitness = fitness
         res.components = {
-            "merma": merma_area / sheet_area if sheet_area else 0.0,
+            "merma": max(0.0, sheet_area - used_area - offcut_area) / sheet_area if sheet_area else 0.0,
+            "merma_bruta": (sheet_area - used_area) / sheet_area if sheet_area else 0.0,
             "desplazamiento": delay,
+            "adherencia_cola": on_time / len(orders) if orders else 1.0,
+            "ordenes_a_tiempo": on_time, "ordenes_en_cola": len(orders),
             "retazo": offcut_area / sheet_area if sheet_area else 0.0,
             "aprovechamiento": used_area / sheet_area if sheet_area else 0.0,
             "pendientes": pending, "hojas": len(res.bins),
