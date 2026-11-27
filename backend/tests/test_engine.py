@@ -220,3 +220,36 @@ def test_polish_never_worse_and_valid(mode, directional):
     _res, sheets = sheets_of(sub, pp, chrom)
     for s in sheets:
         assert validate_sheet(s) == []
+
+
+@pytest.mark.parametrize("mode", ["guillotina", "libre"])
+@pytest.mark.parametrize("directional", [False, True])
+def test_sheet_elimination_never_worse_and_valid(mode, directional):
+    """El vaciado de hojas no aumenta el nº de hojas, no pierde piezas y
+    produce patrones válidos (kerf, refilado, guillotina, veta)."""
+    pp = ProcessParams(cut_mode=mode)
+    for seed in range(3):
+        sub = make_sub(n_orders=12, per=4, directional=directional, seed=seed)
+        dec = Decoder(sub, pp)
+        chrom = seed_chromosomes(sub, pp.tolerance_window)[0]
+        plain = dec.decode(chrom, finalize=True, eliminate=False)
+        better = dec.decode(chrom, finalize=True)
+        assert len(better.bins) <= len(plain.bins)
+        assert better.fitness <= plain.fitness + 1e-9
+        assert sorted(t[0] for b in better.bins for t in b.placed) == sorted(
+            t[0] for b in plain.bins for t in b.placed)
+        _res, sheets = sheets_of(sub, pp, chrom)
+        for s in sheets:
+            assert validate_sheet(s) == []
+
+
+def test_theoretical_bound_above_actual():
+    from app.engine.optimizer import theoretical_bound
+    pp = ProcessParams()
+    sub = make_sub(n_orders=10, per=4, seed=3)
+    res = Decoder(sub, pp).decode(seed_chromosomes(sub, pp.tolerance_window)[0], finalize=True)
+    used = sum(w * h for b in res.bins for _u, _x, _y, w, h, _r in b.placed)
+    actual = used / sum(b.lot.area for b in res.bins)
+    tb = theoretical_bound(sub, pp)
+    teorico = tb["area_piezas"] / tb["area_hojas_min"]
+    assert actual <= teorico < 1.0

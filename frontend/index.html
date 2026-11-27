@@ -71,6 +71,7 @@
           <div class="kpis">
             <div class="kpi"><span>Hojas consumidas</span><b>{{ M.hojas }}</b><em>base {{ B.hojas }}</em></div>
             <div class="kpi good"><span>Aprovechamiento global</span><b>{{ pct(M.aprovechamiento) }}</b><em>base {{ pct(B.aprovechamiento) }}</em></div>
+            <div class="kpi"><span>Aprovechamiento teórico máx.</span><b>{{ pct(M.aprovechamiento_teorico) }}</b><em>cota de área (kerf + refilado)</em></div>
             <div class="kpi bad"><span>Merma neta</span><b>{{ pct(M.merma) }}</b><em>base {{ pct(B.merma) }}</em></div>
             <div class="kpi green"><span>Retazo recuperable</span><b>{{ pct(M.retazo) }}</b><em>base {{ pct(B.retazo) }}</em></div>
             <div class="kpi"><span>Órdenes cubiertas</span><b>{{ M.ordenes_cubiertas }}/{{ M.ordenes_total }}</b>
@@ -87,14 +88,14 @@
         <div class="card">
           <h3>Subproblemas por material (RF-07)</h3>
           <table class="tbl">
-            <thead><tr><th>Material</th><th>Veta</th><th>Piezas</th><th>Hojas</th><th>Aprov.</th><th>Merma</th><th>Retazo</th>
+            <thead><tr><th>Material</th><th>Veta</th><th>Piezas</th><th>Hojas</th><th>Aprov.</th><th>Teórico</th><th>Merma</th><th>Retazo</th>
               <th>Generaciones</th><th>Parada</th><th>Tiempo</th><th>Convergencia F(x)</th></tr></thead>
             <tbody>
               <tr v-for="g in run.result.grupos">
                 <td><b>{{ g.material }}</b></td>
                 <td>{{ g.directional ? '↕ direccional' : 'uniforme' }}</td>
                 <td>{{ g.piezas }}</td><td>{{ g.metricas.hojas }}</td>
-                <td>{{ pct(g.metricas.aprovechamiento) }}</td><td>{{ pct(g.metricas.merma) }}</td><td>{{ pct(g.metricas.retazo) }}</td>
+                <td>{{ pct(g.metricas.aprovechamiento) }}</td><td>{{ pct(g.metricas.aprovechamiento_teorico) }}</td><td>{{ pct(g.metricas.merma) }}</td><td>{{ pct(g.metricas.retazo) }}</td>
                 <td>{{ g.generaciones }}</td><td>{{ g.criterio_parada }}</td><td>{{ g.tiempo_s }} s</td>
                 <td><svg class="spark" viewBox="0 0 160 36" preserveAspectRatio="none"><polyline :points="spark(g.historial)" /></svg></td>
               </tr>
@@ -313,7 +314,7 @@
       <h1>Historial de corridas</h1>
       <div class="card">
         <table class="tbl">
-          <thead><tr><th>Corrida</th><th>Fecha</th><th>Estado</th><th>Hojas</th><th>Aprov.</th><th>Merma</th><th>Órdenes</th><th></th></tr></thead>
+          <thead><tr><th>Corrida</th><th>Fecha</th><th>Estado</th><th>Hojas</th><th>Aprov.</th><th>Teórico</th><th>Merma</th><th>Órdenes</th><th></th></tr></thead>
           <tbody>
             <tr v-for="r in runs">
               <td><b>{{ r.id }}</b></td><td>{{ r.created_at }}</td><td><span :class="['badge', r.status]">{{ r.status }}</span></td>
@@ -347,11 +348,11 @@
         </div>
         <div class="card">
           <h3>Función de aptitud</h3>
-          <p class="formula">min F(x) = w₁·Σ(A<sub>merma</sub>/A<sub>hoja</sub>) + w₂·Σ P<sub>i</sub>·ΔT<sub>i</sub> − w₃·ΣA<sub>retazo</sub>/ΣA<sub>hoja</sub> + w<sub>p</sub>·pendientes</p>
+          <p class="formula">min F(x) = w₁·[A<sub>merma</sub> + (1 − w₃)·A<sub>retazo</sub>] / A<sub>piezas</sub> + w₂·Σ P<sub>i</sub>·ΔT<sub>i</sub> + w<sub>p</sub>·pendientes − ε·Σu<sub>j</sub>²/n</p>
           <div class="fields">
             <label>w₁ · merma<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w1_merma"></label>
             <label>w₂ · prioridad de cola vs. ahorro<input type="number" step="0.01" min="0" v-model.number="settings.pesos.w2_cola"></label>
-            <label>w₃ · bonificación de retazos<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w3_retazo"></label>
+            <label>w₃ · valor de recuperación del retazo (0–0.9)<input type="number" step="0.05" min="0" v-model.number="settings.pesos.w3_retazo"></label>
             <label>wₚ · piezas sin hoja<input type="number" step="1" min="0" v-model.number="settings.pesos.w_pendientes"></label>
             <label>Pᵢ orden Urgente<input type="number" step="0.5" min="0" v-model.number="settings.pesos.peso_urgente"></label>
             <label>Pᵢ orden Normal<input type="number" step="0.5" min="0" v-model.number="settings.pesos.peso_normal"></label>

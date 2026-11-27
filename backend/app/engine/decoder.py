@@ -11,6 +11,7 @@ cabe en ninguna, abre una hoja nueva del inventario heterogéneo:
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from .model import PackedSheet, Piece, Placement, ProcessParams, SheetLot, Subproblem
@@ -103,7 +104,8 @@ class Decoder:
                 return lot, r
         return fitting[-1]
 
-    def decode(self, chrom: list, finalize: bool = False) -> Decoded:
+    def decode(self, chrom: list, finalize: bool = False, deadline: float | None = None,
+               eliminate: bool = True) -> Decoded:
         pp = self.pp
         k = pp.kerf
         pieces = self.pieces
@@ -145,9 +147,25 @@ class Decoder:
             bins.append(b)
 
         if finalize:
-            self._downsize(bins, remaining)
-            self._polish(bins)
+            plain = None
+            if eliminate:
+                snap_bins, snap_rem = list(bins), dict(remaining)
+                self._eliminate_sheets(bins, unplaced, remaining, deadline)
+                if len(bins) != len(snap_bins) or any(a is not b for a, b in zip(bins, snap_bins)):
+                    plain = self._finish_bins(snap_bins, snap_rem, unplaced)
+            res = self._finish_bins(bins, remaining, unplaced)
+            if plain is not None and plain.fitness < res.fitness:
+                res = plain          # el vaciado nunca debe empeorar el resultado final
+            self._renumber(res.bins)
+            return res
         res = Decoded(bins, unplaced)
+        self._evaluate(res)
+        return res
+
+    def _finish_bins(self, bins: list, remaining: dict, unplaced: list) -> Decoded:
+        self._downsize(bins, remaining)
+        self._polish(bins)
+        res = Decoded(bins, list(unplaced))
         self._evaluate(res)
         return res
 
@@ -169,12 +187,13 @@ class Decoder:
         return b
 
     def _downsize(self, bins: list, remaining: dict) -> None:
-        """Mejora local: sustituye cada hoja virgen por la más pequeña disponible
-        que contenga exactamente las mismas piezas."""
+        """Mejora local: sustituye cada hoja por el retazo o la hoja virgen más
+        pequeña disponible que contenga exactamente las mismas piezas. Los
+        retazos se prueban primero (RF-03): pasar una hoja casi vacía a un
+        retazo libera una hoja virgen completa."""
+        candidates = self.offcut_lots + self.virgin_lots
         for i, b in enumerate(bins):
-            if b.lot.is_offcut:
-                continue
-            for lot in self.virgin_lots:
+            for lot in candidates:
                 if lot.area >= b.lot.area - EPS or remaining[lot.lot_id] <= 0:
                     continue
                 nb = None
@@ -190,11 +209,108 @@ class Decoder:
                     remaining[b.lot.lot_id] += 1
                     bins[i] = nb
                     break
-        # Renumerar instancias por lote según la secuencia de corte
+        self._renumber(bins)
+
+    @staticmethod
+    def _renumber(bins: list) -> None:
+        """Renumera instancias por lote según la secuencia de corte."""
         counter: dict[int, int] = {}
         for b in bins:
             counter[b.lot.lot_id] = counter.get(b.lot.lot_id, 0) + 1
             b.instance = counter[b.lot.lot_id]
+
+    def _try_add(self, b: _Bin, extra: list):
+        """Intenta meter ``extra`` (tuplas de ``placed``) en la hoja ``b``.
+        Primero sobre el acomodo actual (barato); si no cabe, re-acomoda la hoja
+        completa con varias órdenes de inserción × variantes del empaquetador."""
+        k = self.pp.kerf
+        packer = b.packer.clone()
+        added = []
+        for uid, _x, _y, w, h, r in extra:
+            p = self.pieces[uid]
+            pos = None
+            for rr in _orients(p, r):
+                ww, hh = _dims(p, rr)
+                pos = packer.insert(ww + k, hh + k)
+                if pos is not None:
+                    added.append((uid, pos[0], pos[1], ww, hh, rr))
+                    break
+            if pos is None:
+                break
+        else:
+            nb = _Bin(b.lot, b.instance, packer, b.placed + added)
+            return nb
+        items = b.placed + list(extra)
+        for order in self._orderings(items):
+            for variant in self.packer_cls.VARIANTS:
+                nb = self._repack(b.lot, order, b.instance, variant)
+                if nb is not None:
+                    return nb
+        return None
+
+    def _fill(self, b: _Bin) -> float:
+        return sum(w * h for _u, _x, _y, w, h, _r in b.placed) / b.lot.area
+
+    def _eliminate_sheets(self, bins: list, unplaced: list, remaining: dict,
+                          deadline: float | None = None) -> None:
+        """Búsqueda local de *vaciado de hojas* (la que más reduce la merma real).
+
+        Toma la hoja menos aprovechada e intenta repartir todas sus piezas en
+        las demás hojas abiertas (sin abrir ninguna nueva). Si lo logra, la hoja
+        se devuelve al inventario. Sólo se acepta el movimiento si la aptitud
+        total (merma + cola + retazos) mejora. Se repite hasta que ninguna hoja
+        pueda vaciarse o se agote el tiempo."""
+        if len(bins) < 2:
+            return
+        k = self.pp.kerf
+        cur = self._fitness_of(bins, unplaced)
+        improved = True
+        while improved and len(bins) > 1:
+            improved = False
+            for vi in sorted(range(len(bins)), key=lambda i: self._fill(bins[i])):
+                if deadline is not None and time.perf_counter() > deadline:
+                    return
+                victim = bins[vi]
+                others = [b for j, b in enumerate(bins) if j != vi]
+                free_area = sum(b.packer.W * b.packer.H for b in others) - sum(
+                    (w + k) * (h + k) for b in others for _u, _x, _y, w, h, _r in b.placed)
+                need = sum((w + k) * (h + k) for _u, _x, _y, w, h, _r in victim.placed)
+                if need > free_area + EPS:
+                    continue
+                trial = list(others)
+                ok = True
+                for item in sorted(victim.placed, key=lambda t: -t[3] * t[4]):
+                    a = (item[3] + k) * (item[4] + k)
+                    # best-fit: primero las hojas con menos espacio libre que aún alcanza
+                    cand = sorted(range(len(trial)), key=lambda j: trial[j].packer.W * trial[j].packer.H
+                                  - sum((w + k) * (h + k) for _u, _x, _y, w, h, _r in trial[j].placed))
+                    placed = False
+                    for j in cand:
+                        tb = trial[j]
+                        if tb.packer.W * tb.packer.H - sum((w + k) * (h + k) for _u, _x, _y, w, h, _r in tb.placed) < a - EPS:
+                            continue
+                        nb = self._try_add(tb, [item])
+                        if nb is not None:
+                            trial[j] = nb
+                            placed = True
+                            break
+                    if not placed:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                f = self._fitness_of(trial, unplaced)
+                if f < cur - 1e-9:
+                    remaining[victim.lot.lot_id] += 1
+                    bins[:] = trial
+                    cur = f
+                    improved = True
+                    break
+
+    def _fitness_of(self, bins: list, unplaced: list) -> float:
+        r = Decoded(list(bins), list(unplaced))
+        self._evaluate(r)
+        return r.fitness
 
     def _orderings(self, placed: list) -> list:
         """Órdenes de inserción candidatos para re-acomodar una hoja."""
@@ -205,6 +321,7 @@ class Decoder:
             sorted(placed, key=lambda t: (-dims(t)[0], -dims(t)[1])),       # ancho desc
             sorted(placed, key=lambda t: -dims(t)[0] * dims(t)[1]),         # área desc
             sorted(placed, key=lambda t: -max(dims(t))),                    # lado mayor desc
+            sorted(placed, key=lambda t: (-min(dims(t)), -max(dims(t)))),  # lado menor desc
         ]
 
     def _waste(self, b: _Bin) -> float:
@@ -239,12 +356,24 @@ class Decoder:
                                disjoint=(pp.cut_mode == "guillotina"))
 
     def _evaluate(self, res: Decoded) -> None:
-        """F(x) = w1·Σ(A_merma/A_hoja) + w2·Σ P_i·ΔT_i − w3·ΣA_retazo/ΣA_hoja + w_p·pendientes"""
+        """Aptitud (a minimizar), normalizada por el área total de piezas:
+
+        F = w1·[A_merma + (1 − w3)·A_retazo] / A_piezas
+            + w2·Σ P_i·ΔT_i + w_p·pendientes − ε·Σ u_j² / n
+
+        * Todo el material consumido que no se convierte en pieza cuesta: la
+          merma completa y el retazo sólo parcialmente (w3 = valor de
+          recuperación del retazo, 0 ≤ w3 < 1). Con la fórmula anterior el
+          retazo *restaba*, lo que premiaba abrir hojas casi vacías.
+        * El término −ε·Σu²/n (u = aprovechamiento de cada hoja) es el
+          desempate clásico de bin packing: entre soluciones con el mismo
+          consumo prefiere concentrar piezas y dejar una hoja casi vacía, lo
+          que da al AG un gradiente hacia eliminar hojas completas.
+        """
         pp = self.pp
         pieces = self.pieces
-        merma_sum = 0.0
-        sheet_area = 0.0
-        offcut_area = 0.0
+        sheet_area = used_area = offcut_area = 0.0
+        fill_sq = 0.0
         completion: dict[int, int] = {}
         for bi, b in enumerate(res.bins):
             a = b.lot.area
@@ -255,9 +384,11 @@ class Decoder:
                 if completion.get(oid, -1) < bi:
                     completion[oid] = bi
             off = sum(r[2] * r[3] for r in self.bin_offcuts(b))
-            merma_sum += max(0.0, a - used - off) / a
             sheet_area += a
+            used_area += used
             offcut_area += off
+            fill_sq += (used / a) ** 2
+        merma_area = max(0.0, sheet_area - used_area - offcut_area)
         pending = 0.0
         never = len(res.bins) + 1
         for uid in res.unplaced:
@@ -274,11 +405,16 @@ class Decoder:
             d = new_rank - self.order_rank[oid] - pp.tolerance_window
             if d > 0:
                 delay += self.order_weight[oid] * d
-        retazo = offcut_area / sheet_area if sheet_area else 0.0
-        fitness = pp.w1 * merma_sum + pp.w2 * delay - pp.w3 * retazo + pp.w_pending * pending
+        w3 = min(max(pp.w3, 0.0), 0.9)       # un retazo nunca vale tanto como no consumir la hoja
+        consumo = (merma_area + (1.0 - w3) * offcut_area) / self.total_piece_area
+        compact = (fill_sq / len(res.bins)) if res.bins else 0.0
+        fitness = pp.w1 * consumo + pp.w2 * delay + pp.w_pending * pending - 0.02 * compact
         res.fitness = fitness
         res.components = {
-            "merma": merma_sum, "desplazamiento": delay, "retazo": retazo,
+            "merma": merma_area / sheet_area if sheet_area else 0.0,
+            "desplazamiento": delay,
+            "retazo": offcut_area / sheet_area if sheet_area else 0.0,
+            "aprovechamiento": used_area / sheet_area if sheet_area else 0.0,
             "pendientes": pending, "hojas": len(res.bins),
         }
 

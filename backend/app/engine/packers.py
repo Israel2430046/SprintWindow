@@ -33,6 +33,11 @@ class GuillotineBin:
         self.split = split
         self.free: list[Rect] = [(0.0, 0.0, W, H)] if W > EPS and H > EPS else []
 
+    def clone(self) -> "GuillotineBin":
+        c = GuillotineBin.__new__(GuillotineBin)
+        c.W, c.H, c.fit, c.split, c.free = self.W, self.H, self.fit, self.split, list(self.free)
+        return c
+
     def can_fit(self, w: float, h: float) -> bool:
         for fx, fy, fw, fh in self.free:
             if fw + EPS >= w and fh + EPS >= h:
@@ -180,6 +185,11 @@ class MaxRectsBin:
         self.H = H
         self.fit = fit
         self.free: list[Rect] = [(0.0, 0.0, W, H)] if W > EPS and H > EPS else []
+
+    def clone(self) -> "MaxRectsBin":
+        c = MaxRectsBin.__new__(MaxRectsBin)
+        c.W, c.H, c.fit, c.free = self.W, self.H, self.fit, list(self.free)
+        return c
 
     def can_fit(self, w: float, h: float) -> bool:
         for fx, fy, fw, fh in self.free:

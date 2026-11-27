@@ -92,6 +92,30 @@ def build_subproblems(orders: list[dict], lots: list[dict], settings: dict):
 
 # ----------------------------------------------------------------- métricas
 
+def theoretical_bound(sub: Subproblem, pp: ProcessParams) -> dict:
+    """Cota superior del aprovechamiento alcanzable (cota de área).
+
+    Aun con un acomodo perfecto (cero huecos) se pierde material por:
+    * el kerf: cada pieza ocupa (w + kerf)·(h + kerf);
+    * el refilado perimetral de cada hoja (área útil < área nominal).
+    Por eso el área mínima de hoja es Σ(w+k)(h+k) / r_max, donde r_max es la
+    mejor razón área útil/área nominal entre los lotes del material. El 100 %
+    es inalcanzable; además la geometría de las piezas (p. ej. piezas de más
+    de media hoja de ancho que no admiten vecina) puede alejar el óptimo real
+    de esta cota, que es optimista.
+    """
+    k = pp.kerf
+    lots = [l for l in sub.lots if l.quantity > 0]
+    if not lots:
+        return {"area_hojas_min": 0.0, "area_piezas": 0.0}
+    fit = [p for p in sub.pieces if any(
+        piece_fits_lot(w, h, l, pp) for l in lots
+        for (w, h) in ([(p.w, p.h), (p.h, p.w)] if p.rotatable else [(p.w, p.h)]))]
+    ratio = max((l.w - 2 * pp.trim - k) * (l.h - 2 * pp.trim - k) / l.area for l in lots)
+    inflated = sum((p.w + k) * (p.h + k) for p in fit)
+    return {"area_hojas_min": inflated / ratio if ratio > 0 else 0.0, "area_piezas": sum(p.area for p in fit)}
+
+
 def _metrics(dec: Decoder, d: Decoded) -> dict:
     sheet_area = used = off = cost = 0.0
     for b in d.bins:
@@ -110,6 +134,8 @@ def _metrics(dec: Decoder, d: Decoded) -> dict:
 
 def _finish(m: dict) -> dict:
     a = m["area_hojas"]
+    lb = m.get("cota_area_hojas") or 0.0
+    m["aprovechamiento_teorico"] = (m.get("cota_area_piezas", 0.0) / lb) if lb else 0.0
     m["aprovechamiento"] = (m["area_piezas"] / a) if a else 0.0
     m["retazo"] = (m["area_retazos"] / a) if a else 0.0
     m["merma"] = (1 - m["aprovechamiento"] - m["retazo"]) if a else 0.0
@@ -119,8 +145,8 @@ def _finish(m: dict) -> dict:
 
 def _sum(ms: list[dict]) -> dict:
     keys = ["hojas", "area_hojas", "area_piezas", "area_retazos", "costo_merma",
-            "piezas_colocadas", "piezas_pendientes"]
-    return {k: sum(m[k] for m in ms) for k in keys}
+            "piezas_colocadas", "piezas_pendientes", "cota_area_hojas", "cota_area_piezas"]
+    return {k: sum(m.get(k, 0.0) for m in ms) for k in keys}
 
 
 def _order_status(orders_total: dict, orders_placed: dict) -> dict:
@@ -176,6 +202,9 @@ def optimize(orders: list[dict], lots: list[dict], settings: dict, run_id: str,
         done_pieces += len(sub.pieces)
 
         mo, mb = _metrics(dec, best), _metrics(dec, baseline)
+        tb = theoretical_bound(sub, pp)
+        for m in (mo, mb):
+            m["cota_area_hojas"], m["cota_area_piezas"] = tb["area_hojas_min"], tb["area_piezas"]
         m_opt.append(mo)
         m_base.append(mb)
         for b in baseline.bins:

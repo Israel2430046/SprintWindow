@@ -141,7 +141,7 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
     cache: dict[tuple, float] = {}
 
     seeds = seed_chromosomes(sub, pp.tolerance_window)
-    baseline = dec.decode(seeds[0], finalize=True)    # línea base FIFO sin optimizar
+    baseline = dec.decode(seeds[0], finalize=True, eliminate=False)    # línea base FIFO sin optimizar
 
     def evaluate(pop: list) -> list[float]:
         keys = [tuple(c) for c in pop]
@@ -183,7 +183,7 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
         if stagn >= gp.stagnation:
             stop = "estancamiento"
             break
-        if time.perf_counter() - t0 >= T:
+        if time.perf_counter() - t0 >= T * 0.8:     # 20 % del tiempo se reserva al pulido final
             stop = "T_max"
             break
         if cancelled and cancelled():
@@ -218,7 +218,31 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
         if progress:
             progress(gen, best_fit)
 
-    decoded = dec.decode(best, finalize=True)
+    # Post-optimización: la búsqueda local (vaciado de hojas, reducción a
+    # retazos y re-acomodo) se aplica al mejor individuo y a otros élites
+    # distintos mientras quede tiempo; distintos órdenes de corte llevan a
+    # distintos óptimos locales.
+    deadline = t0 + max(T, 1.0)
+    finals = [best]
+    seen = {tuple(best)}
+    for i in sorted(range(len(pop)), key=lambda i: fits[i]):
+        if len(finals) >= 4:
+            break
+        key = tuple(pop[i])
+        if key not in seen:
+            seen.add(key)
+            finals.append(pop[i])
+    for s in seeds:
+        if tuple(s) not in seen and len(finals) < 6:
+            seen.add(tuple(s))
+            finals.append(s)
+    decoded = None
+    for c in finals:
+        if decoded is not None and time.perf_counter() > deadline:
+            break
+        d = dec.decode(c, finalize=True, deadline=deadline)
+        if decoded is None or d.fitness < decoded.fitness - 1e-12:
+            decoded, best = d, c
     if baseline.fitness < decoded.fitness:   # nunca entregar algo peor que la línea base
         decoded, best = baseline, seeds[0]
     return GAResult(best, decoded, baseline, history, gen, time.perf_counter() - t0, stop, len(cache))
