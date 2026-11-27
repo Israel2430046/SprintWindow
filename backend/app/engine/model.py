@@ -89,6 +89,10 @@ class GAParams:
     elitism: float = 0.05
     tournament_k: int = 3
     seed: int | None = None
+    # Extensiones del AG (sobre la base de la ERS, sección 4.3)
+    p_group: float = 0.3                  # prob. de heredar hojas completas de un élite
+    adaptive_mutation: bool = True        # la mutación crece con el estancamiento
+    immigrants: float = 0.3               # fracción reemplazada al llegar a X/2 sin mejora
 
 
 @dataclass

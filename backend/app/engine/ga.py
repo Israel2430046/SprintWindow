@@ -226,9 +226,60 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
 
     local_search(best)
 
+    # ---- Elitismo a nivel de hoja (herencia de grupos) -------------------
+    # En bin packing lo valioso de una solución son sus *hojas bien llenas*
+    # (grupos de piezas que encajan). De los élites se guardan esas hojas y
+    # un hijo puede heredarlas completas: sus piezas pasan al frente de la
+    # permutación (en el mismo orden y rotación), y el decodificador vuelve a
+    # formar esas hojas antes de acomodar el resto.
+    elite_sheets: list = []       # [(variante, [lista de genes por hoja buena])]
+
+    def refresh_elite_sheets() -> None:
+        elite_sheets.clear()
+        seen_e: set = set()
+        for i in sorted(range(len(pop)), key=lambda i: fits[i]):
+            k = key(pop[i])
+            if k in seen_e:
+                continue
+            seen_e.add(k)
+            d = raw(pop[i])
+            groups = []
+            for b in d.bins:
+                fill = sum(t[3] * t[4] for t in b.placed) / b.lot.area
+                if fill >= 0.75:
+                    groups.append([(t[0], bool(t[5])) for t in b.placed])
+            if groups:
+                elite_sheets.append((pop[i][1], groups))
+            if len(seen_e) >= max(2, n_elite):
+                break
+
+    def inherit_sheets(perm: list, v: int):
+        if not elite_sheets:
+            return perm, v
+        ev, groups = rng.choice(elite_sheets)
+        take = [g for g in groups if rng.random() < 0.5] or [rng.choice(groups)]
+        front, used = [], set()
+        for g in take:
+            for gene in g:
+                if gene[0] not in used:
+                    used.add(gene[0])
+                    front.append(gene)
+        return front + [g for g in perm if g[0] not in used], ev
+
+    def random_individual():
+        c = list(rng.choice(seeds))
+        if rng.random() < 0.5:
+            rng.shuffle(c)
+        else:
+            for _ in range(rng.randint(1, max(1, n // 5))):
+                c = mutate(c, rotatable, rng)
+        return (c, rng.randrange(n_var))
+
+    refresh_elite_sheets()
     stagn = 0
     gen = 0
     stop = "generaciones"
+    immigrated = False
     cx = order_crossover if gp.crossover.upper() == "OX" else pmx_crossover
     while True:
         if gen >= gp.max_generations:
@@ -247,9 +298,16 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
             stop = "trivial"
             break
         gen += 1
+        # Mutación adaptativa: con estancamiento s la probabilidad sube hasta 2.5×.
+        p_mut = gp.p_mutation
+        if gp.adaptive_mutation and gp.stagnation > 0:
+            p_mut = min(0.95, gp.p_mutation * (1.0 + 1.5 * stagn / gp.stagnation))
         order = sorted(range(size), key=lambda i: fits[i])
-        new_pop = [pop[i] for i in order[:n_elite]]
+        new_pop = [pop[i] for i in order[:n_elite]]          # elitismo clásico (top %)
+        keys_in = {key(c) for c in new_pop}
+        tries = 0
         while len(new_pop) < size:
+            tries += 1
             p1 = tournament(pop, fits, gp.tournament_k, rng)
             p2 = tournament(pop, fits, gp.tournament_k, rng)
             if rng.random() < gp.p_crossover:
@@ -257,20 +315,41 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
                 v = p1[1] if rng.random() < 0.5 else p2[1]
             else:
                 perm, v = list(p1[0]), p1[1]
-            if rng.random() < gp.p_mutation:
+            if rng.random() < gp.p_group:
+                perm, v = inherit_sheets(perm, v)
+            if rng.random() < p_mut:
                 perm = mutate(perm, rotatable, rng)
                 if rng.random() < 0.15:
                     v = rng.randrange(n_var)        # mutación del gen de heurística
-            new_pop.append((perm, v))
+            child = (perm, v)
+            # Sin duplicados: una copia exacta se vuelve a mutar (diversidad).
+            if key(child) in keys_in and tries < size * 4:
+                child = (mutate(perm, rotatable, rng), v)
+                if key(child) in keys_in:
+                    continue
+            keys_in.add(key(child))
+            new_pop.append(child)
         pop = new_pop
         fits = evaluate(pop)
         gi = min(range(size), key=lambda i: fits[i])
         if fits[gi] < best_fit - 1e-9:
             best, best_fit = pop[gi], fits[gi]
             stagn = 0
+            immigrated = False
             local_search(best)
         else:
             stagn += 1
+        # Inmigrantes: a mitad del estancamiento se renueva la parte peor de la
+        # población (se conservan los élites) para escapar del óptimo local.
+        if gp.immigrants > 0 and not immigrated and stagn >= max(2, gp.stagnation // 2):
+            immigrated = True
+            order = sorted(range(size), key=lambda i: fits[i])
+            n_imm = int(size * gp.immigrants)
+            for i in order[size - n_imm:]:
+                pop[i] = random_individual()
+            fits = evaluate(pop)
+        if gen % 5 == 0 or stagn == 0:
+            refresh_elite_sheets()
         history.append(round(best_fit, 6))
         if progress:
             progress(gen, best_fit)
