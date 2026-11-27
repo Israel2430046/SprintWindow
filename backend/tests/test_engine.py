@@ -275,3 +275,48 @@ def test_memetic_ga_layout_valid(mode, directional):
                  "directional": ps.lot.directional, "cut_mode": mode, "placements": pls,
                  "offcuts": [{"x": r[0], "y": r[1], "w": r[2], "h": r[3]} for r in ps.offcuts]}
         assert validate_sheet(sheet) == []
+
+
+def test_ga_extensions_valid_and_never_worse_than_baseline():
+    """Élite de hojas + mutación adaptativa + inmigrantes: patrón válido y
+    nunca peor que la línea base."""
+    pp = ProcessParams()
+    sub = make_sub(n_orders=10, per=4, seed=7)
+    res = run_ga(sub, pp, GAParams(population=16, max_generations=60, stagnation=10, time_limit_s=5, seed=2,
+                                   p_group=0.3, adaptive_mutation=True, immigrants=0.3))
+    uids = sorted([t[0] for b in res.decoded.bins for t in b.placed] + res.decoded.unplaced)
+    assert uids == list(range(len(sub.pieces)))
+    assert res.decoded.fitness <= res.baseline.fitness + 1e-9
+    assert res.history == sorted(res.history, reverse=True)
+
+
+def test_sheet_lower_bound_valid_and_optimum_stop():
+    """La cota inferior nunca supera el nº de hojas de una solución real, y si
+    todas las piezas son "grandes" el AG demuestra el óptimo y se detiene."""
+    pp = ProcessParams()
+    for seed in range(3):
+        sub = make_sub(n_orders=10, per=4, seed=seed)
+        lb = Decoder(sub, pp).sheet_lower_bound()["hojas"]
+        res = run_ga(sub, pp, GAParams(population=12, max_generations=10, time_limit_s=3, seed=1))
+        assert 0 < lb <= len(res.decoded.bins)
+    # 5 piezas de 900x1500 en hojas 1220x2440: cada una ocupa más de media hoja
+    # en ambos ejes -> cota = 5 = óptimo, el AG debe parar por cota.
+    pieces = [Piece(i, i, f"O{i}", "c", "x", "p", 900, 1500, True, i, 1.0, "K") for i in range(5)]
+    lots = [SheetLot(1, "A", 1220, 2440, 3, "b", "l", False, False, 10)]
+    sub = Subproblem(MaterialKey.of("b", "l", 3), pieces, lots, False)
+    res = run_ga(sub, pp, GAParams(population=8, max_generations=500, stagnation=400, time_limit_s=20, seed=1))
+    assert res.lower_bound["hojas"] == 5 == len(res.decoded.bins)
+    assert res.stop_reason == "óptimo (cota)"
+    assert res.elapsed < 5
+
+
+def test_long_run_settings_map_to_ga_params():
+    from app.db import DEFAULT_SETTINGS
+    from app.engine.optimizer import params_from_settings
+    import copy
+    st = copy.deepcopy(DEFAULT_SETTINGS)
+    st["ga"]["sin_limite"] = True
+    st["ga"]["limite_largo_s"] = 120
+    _pp, gp = params_from_settings(st)
+    assert gp.time_limit_s == 120 and gp.max_generations >= 10 ** 9
+    assert gp.p_group > 0 and gp.adaptive_mutation and gp.immigrants > 0 and gp.stop_at_bound

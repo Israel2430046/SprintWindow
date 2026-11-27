@@ -42,6 +42,10 @@ DEFAULT_SETTINGS = {
         "elitismo": 0.05,
         "torneo_k": 3,
         "semilla": None,
+        "extensiones": False,           # élite de hojas, mutación adaptativa e inmigrantes
+        "parada_optimo": True,          # detener al alcanzar la cota inferior de hojas
+        "sin_limite": False,            # corrida larga: sólo estancamiento / óptimo / cancelar
+        "limite_largo_s": 3600.0,       # tope de seguridad de la corrida larga
     },
     "holguras": DEFAULT_HOLGURAS,
 }

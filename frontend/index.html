@@ -49,6 +49,10 @@
         <div class="progress"><div :style="{width: (progress.avance||0)*100 + '%'}"></div></div>
         <div class="muted" v-if="progress.material">
           Grupo {{ progress.grupo }}/{{ progress.grupos }} · {{ progress.material }} · generación {{ progress.generacion }} · F(x) = {{ progress.fitness }}
+          <template v-if="progress.transcurrido_s != null"> · {{ progress.transcurrido_s }} s</template>
+        </div>
+        <div class="note" v-if="progress.sin_limite">
+          Corrida larga: termina sola al estancarse o al demostrar el óptimo (nº de hojas = cota inferior). Puedes detenerla en cualquier momento.
         </div>
       </div>
 
@@ -93,13 +97,15 @@
         <div class="card">
           <h3>Subproblemas por material (RF-07)</h3>
           <table class="tbl">
-            <thead><tr><th>Material</th><th>Veta</th><th>Piezas</th><th>Hojas</th><th>Aprov.</th><th>Teórico</th><th>Merma</th><th>Retazo</th>
+            <thead><tr><th>Material</th><th>Veta</th><th>Piezas</th><th>Hojas (mín.)</th><th>Aprov.</th><th>Teórico</th><th>Merma</th><th>Retazo</th>
               <th>Generaciones</th><th>Parada</th><th>Tiempo</th><th>Convergencia F(x)</th></tr></thead>
             <tbody>
               <tr v-for="g in run.result.grupos">
                 <td><b>{{ g.material }}</b></td>
                 <td>{{ g.directional ? '↕ direccional' : 'uniforme' }}</td>
-                <td>{{ g.piezas }}</td><td>{{ g.metricas.hojas }}</td>
+                <td>{{ g.piezas }}</td>
+                <td>{{ g.metricas.hojas }} <span class="muted">({{ g.cota_hojas || '–' }})</span>
+                  <b v-if="g.optimo_demostrado" class="txt-good" title="El nº de hojas iguala la cota inferior: no existe solución con menos hojas">✓ óptimo</b></td>
                 <td>{{ pct(g.metricas.aprovechamiento) }}</td><td>{{ pct(g.metricas.aprovechamiento_teorico) }}</td><td>{{ pct(g.metricas.merma) }}</td><td>{{ pct(g.metricas.retazo) }}</td>
                 <td>{{ g.generaciones }}</td><td>{{ g.criterio_parada }}</td><td>{{ g.tiempo_s }} s</td>
                 <td><svg class="spark" viewBox="0 0 160 36" preserveAspectRatio="none"><polyline :points="spark(g.historial)" /></svg></td>
@@ -377,6 +383,13 @@
             <label>Elitismo (fracción)<input type="number" step="0.01" min="0" max="0.5" v-model.number="settings.ga.elitismo"></label>
             <label>Torneo k<input type="number" min="2" v-model.number="settings.ga.torneo_k"></label>
             <label>Semilla (vacío = aleatoria)<input type="number" v-model.number="settings.ga.semilla"></label>
+            <label title="Herencia de hojas completas de los élites, mutación adaptativa al estancarse e inmigrantes a mitad del estancamiento. Ayuda poco en corridas cortas; recomendado con Tₘₐₓ ≥ 60 s.">
+              <span><input type="checkbox" v-model="settings.ga.extensiones"> Extensiones del AG (élite de hojas, mutación adaptativa, inmigrantes)</span></label>
+            <label title="Detiene el AG en cuanto el nº de hojas iguala la cota inferior demostrable: ya no puede existir una solución con menos hojas.">
+              <span><input type="checkbox" v-model="settings.ga.parada_optimo"> Parada por óptimo (nº de hojas = cota inferior)</span></label>
+            <label title="Ignora Tₘₐₓ y Gₘₐₓ: el AG corre hasta estancarse X generaciones, demostrar el óptimo o que lo detengas. Activa las extensiones automáticamente.">
+              <span><input type="checkbox" v-model="settings.ga.sin_limite"> Corrida larga (sin límite de tiempo)</span></label>
+            <label v-if="settings.ga.sin_limite">Tope de seguridad (s)<input type="number" min="60" max="86400" step="60" v-model.number="settings.ga.limite_largo_s"></label>
           </div>
         </div>
         <div class="card">

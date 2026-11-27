@@ -72,6 +72,71 @@ class Decoder:
             self.order_rank[p.order_id] = p.queue_rank
             self.order_weight[p.order_id] = p.priority_weight
 
+    # ------------------------------------------------------------- cota inferior
+    def sheet_lower_bound(self) -> dict:
+        """Cota inferior demostrable del número de hojas (para la parada por óptimo).
+
+        * L1 (área): Σ(w+k)(h+k) / mayor área útil entre los lotes.
+        * Piezas "grandes": una pieza que, en toda orientación permitida y en
+          todo lote donde cabe, mide más de la mitad del ancho útil Y más de la
+          mitad del alto útil no puede compartir hoja con otra pieza grande
+          (dos rectángulos así no caben sin traslaparse ni en x ni en y), así
+          que cada una necesita su propia hoja.
+        * Piezas "altas": si en toda orientación y lote válidos la pieza mide
+          más de la mitad del alto útil, dos de ellas no pueden apilarse, así
+          que cualquier línea vertical cruza a lo más una: sus anchos suman como
+          mucho el ancho útil por hoja ⇒ ⌈Σ anchos / ancho útil máx.⌉ hojas.
+          Análogo para piezas "anchas" (alturas sobre el alto útil máximo).
+        Cota = máximo de las anteriores. Sólo cuenta piezas que caben en algún
+        lote (las imposibles se reportan aparte como pendientes).
+        """
+        import math
+        k = self.pp.kerf
+        lots = [l for l in self.sub.lots if l.quantity > 0]
+        if not lots:
+            return {"hojas": 0, "grandes": 0, "piezas_colocables": 0}
+        inner = {l.lot_id: inner_size(l, self.pp) for l in lots}
+        max_inner = max(iw * ih for iw, ih in inner.values())
+        max_w = max(iw for iw, _ih in inner.values())
+        max_h = max(ih for _iw, ih in inner.values())
+        area = 0.0
+        big = 0
+        placeable = 0
+        tall_w = wide_h = 0.0
+        for p in self.pieces:
+            orients = [(p.w, p.h), (p.h, p.w)] if p.rotatable else [(p.w, p.h)]
+            fits_any = False
+            is_big = is_tall = is_wide = True
+            min_w = min_h = float("inf")
+            for l in lots:
+                iw, ih = inner[l.lot_id]
+                for w, h in orients:
+                    if piece_fits_lot(w, h, l, self.pp):
+                        fits_any = True
+                        tall = h + k > ih / 2 + EPS
+                        wide = w + k > iw / 2 + EPS
+                        is_big &= tall and wide
+                        is_tall &= tall
+                        is_wide &= wide
+                        min_w = min(min_w, w + k)
+                        min_h = min(min_h, h + k)
+            if not fits_any:
+                continue
+            placeable += 1
+            area += (p.w + k) * (p.h + k)
+            big += is_big
+            if is_tall:
+                tall_w += min_w
+            if is_wide:
+                wide_h += min_h
+        bounds = [
+            math.ceil(area / max_inner - 1e-9) if max_inner > 0 else 0,
+            big,
+            math.ceil(tall_w / max_w - 1e-9) if max_w > 0 else 0,
+            math.ceil(wide_h / max_h - 1e-9) if max_h > 0 else 0,
+        ]
+        return {"hojas": max(bounds), "grandes": big, "piezas_colocables": placeable}
+
     # ------------------------------------------------------------------ decode
     def _new_bin(self, lot: SheetLot, instance: int, variant=None) -> _Bin:
         iw, ih = inner_size(lot, self.pp)
@@ -175,9 +240,39 @@ class Decoder:
     def _finish_bins(self, bins: list, remaining: dict, unplaced: list) -> Decoded:
         self._downsize(bins, remaining)
         self._polish(bins)
+        bins[:] = self._sequence(bins, unplaced)
         res = Decoded(bins, list(unplaced))
         self._evaluate(res)
         return res
+
+    def _sequence(self, bins: list, unplaced: list) -> list:
+        """Secuenciación de hojas (RN-04 / KPI 3): el orden en que se cortan las
+        hojas no cambia el material consumido, así que se elige el que menos
+        desplaza las órdenes en la cola. Se prueban varios criterios de orden y
+        luego intercambios adyacentes mientras mejoren la aptitud."""
+        if len(bins) < 2:
+            return bins
+        P = self.pieces
+        rank = self.order_rank
+
+        def ranks(b):
+            return [rank[P[t[0]].order_id] for t in b.placed] or [0]
+
+        cands = [list(bins),
+                 sorted(bins, key=lambda b: (min(ranks(b)), max(ranks(b)))),
+                 sorted(bins, key=lambda b: (max(ranks(b)), min(ranks(b)))),
+                 sorted(bins, key=lambda b: sum(ranks(b)) / len(ranks(b)))]
+        best = min(cands, key=lambda c: self._fitness_of(c, unplaced))
+        best_f = self._fitness_of(best, unplaced)
+        improved = True
+        while improved:
+            improved = False
+            for i in range(len(best) - 1):
+                c = best[:i] + [best[i + 1], best[i]] + best[i + 2:]
+                f = self._fitness_of(c, unplaced)
+                if f < best_f - 1e-12:
+                    best, best_f, improved = c, f, True
+        return best
 
     def _repack(self, lot: SheetLot, placed: list, instance: int, variant=None):
         b = self._new_bin(lot, instance, variant)

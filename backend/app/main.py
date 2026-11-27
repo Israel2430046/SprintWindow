@@ -315,6 +315,11 @@ def put_settings(s: dict):
             errs.append("tiempo_max_s debe estar entre 0.5 y 600")
     except (TypeError, ValueError):
         errs.append("tiempo_max_s debe ser numérico")
+    try:
+        if not (60 <= float(g.get("limite_largo_s", 3600)) <= 86400):
+            errs.append("limite_largo_s debe estar entre 60 y 86400 (24 h)")
+    except (TypeError, ValueError):
+        errs.append("limite_largo_s debe ser numérico")
     if errs:
         _err(422, errs)
     db.save_settings(cur)

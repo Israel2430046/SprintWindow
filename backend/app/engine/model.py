@@ -89,10 +89,13 @@ class GAParams:
     elitism: float = 0.05
     tournament_k: int = 3
     seed: int | None = None
-    # Extensiones del AG (sobre la base de la ERS, sección 4.3)
-    p_group: float = 0.3                  # prob. de heredar hojas completas de un élite
-    adaptive_mutation: bool = True        # la mutación crece con el estancamiento
-    immigrants: float = 0.3               # fracción reemplazada al llegar a X/2 sin mejora
+    # Extensiones del AG (opcionales, sobre la base de la ERS sección 4.3).
+    # Apagadas por defecto: en corridas cortas no mejoran (ver tools/benchmark);
+    # con Tₘₐₓ ≥ 10 s por material ahorran ≈ 1 hoja de cada 300.
+    p_group: float = 0.0                  # prob. de heredar hojas completas de un élite
+    adaptive_mutation: bool = False       # la mutación crece con el estancamiento
+    immigrants: float = 0.0               # fracción reemplazada al llegar a X/2 sin mejora
+    stop_at_bound: bool = True            # parada por óptimo: nº de hojas = cota inferior
 
 
 @dataclass

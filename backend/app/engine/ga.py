@@ -118,7 +118,9 @@ def seed_chromosomes(sub: Subproblem, tol: int) -> list[list]:
 
 class GAResult:
     def __init__(self, best: list, decoded: Decoded, baseline: Decoded, history: list,
-                 generations: int, elapsed: float, stop_reason: str, evaluations: int):
+                 generations: int, elapsed: float, stop_reason: str, evaluations: int,
+                 lower_bound: dict | None = None):
+        self.lower_bound = lower_bound or {}
         self.best = best
         self.decoded = decoded
         self.baseline = baseline
@@ -158,6 +160,16 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
 
     seeds = seed_chromosomes(sub, pp.tolerance_window)
     baseline = dec.decode(seeds[0], finalize=True, eliminate=False)    # línea base FIFO sin optimizar
+    lb = dec.sheet_lower_bound()
+    n_impossible = n - lb["piezas_colocables"]
+
+    def at_optimum() -> bool:
+        """Parada por óptimo: todas las piezas colocables están en hoja y el
+        número de hojas iguala la cota inferior, así que no existe solución
+        con menos hojas."""
+        return (gp.stop_at_bound and final_best is not None
+                and len(final_best.unplaced) <= n_impossible
+                and 0 < len(final_best.bins) <= lb["hojas"])
 
     def key(ind) -> tuple:
         return (tuple(ind[0]), ind[1])
@@ -282,6 +294,9 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
     immigrated = False
     cx = order_crossover if gp.crossover.upper() == "OX" else pmx_crossover
     while True:
+        if at_optimum():
+            stop = "óptimo (cota)"
+            break
         if gen >= gp.max_generations:
             stop = "G_max"
             break
@@ -364,4 +379,4 @@ def run_ga(sub: Subproblem, pp: ProcessParams, gp: GAParams, time_limit: float |
     best_perm = final_ind[0]
     if baseline.fitness < decoded.fitness:   # nunca entregar algo peor que la línea base
         decoded, best_perm = baseline, seeds[0]
-    return GAResult(best_perm, decoded, baseline, history, gen, time.perf_counter() - t0, stop, len(cache))
+    return GAResult(best_perm, decoded, baseline, history, gen, time.perf_counter() - t0, stop, len(cache), lb)

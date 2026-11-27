@@ -29,6 +29,17 @@ def params_from_settings(settings: dict) -> tuple[ProcessParams, GAParams]:
         elitism=float(g["elitismo"]), tournament_k=int(g["torneo_k"]),
         seed=(int(g["semilla"]) if g.get("semilla") not in (None, "") else None),
     )
+    from dataclasses import replace
+    if g.get("sin_limite"):
+        # Corrida larga: sin Tₘₐₓ ni Gₘₐₓ prácticos. Termina por estancamiento,
+        # por óptimo demostrado (cota) o al cancelar; el tope de seguridad
+        # evita que un proceso quede corriendo para siempre.
+        gp = replace(gp, time_limit_s=float(g.get("limite_largo_s") or 3600.0),
+                     max_generations=10 ** 9, p_group=0.3, adaptive_mutation=True, immigrants=0.3)
+    elif g.get("extensiones"):
+        # Élite de hojas + mutación adaptativa + inmigrantes (recomendado para corridas largas)
+        gp = replace(gp, p_group=0.3, adaptive_mutation=True, immigrants=0.3)
+    gp = replace(gp, stop_at_bound=bool(g.get("parada_optimo", True)))
     return pp, gp
 
 
@@ -183,27 +194,43 @@ def optimize(orders: list[dict], lots: list[dict], settings: dict, run_id: str,
         dec = Decoder(sub, pp)
         for p in sub.pieces:
             tot_by_order[p.order_id] += 1
-        budget = max(1.0, gp.time_limit_s * len(sub.pieces) / total_pieces)
+        # Presupuesto dinámico: el tiempo que no usó un grupo (paró por
+        # estancamiento u óptimo) pasa a los grupos siguientes.
+        left_pieces = sum(len(s.pieces) for s in subs[gi:] if s.lots) or 1
+        left_time = gp.time_limit_s - (time.perf_counter() - t0)
+        budget = max(1.0, left_time * len(sub.pieces) / left_pieces)
         if not sub.lots:
             warnings.append(f"{sub.key.label()}: no hay hojas en inventario para este material (RN-01).")
 
         if use_ga and sub.lots:
-            def prog(gen, fit, _gi=gi, _n=len(sub.pieces), _done=done_pieces):
+            g_start = time.perf_counter()
+
+            def prog(gen, fit, _gi=gi, _n=len(sub.pieces), _done=done_pieces, _b=budget, _g0=g_start):
                 if progress:
+                    frac = max(min(1.0, gen / max(1, gp.max_generations)),
+                               min(1.0, (time.perf_counter() - _g0) / _b))
                     progress({"grupo": _gi + 1, "grupos": len(subs), "material": sub.key.label(),
                               "generacion": gen, "fitness": round(fit, 5),
-                              "avance": min(0.99, (_done + _n * min(1.0, gen / max(1, gp.max_generations)))
-                                            / total_pieces)})
+                              "transcurrido_s": round(time.perf_counter() - t0, 1),
+                              "sin_limite": bool(settings["ga"].get("sin_limite")),
+                              "avance": min(0.99, (_done + _n * frac) / total_pieces)})
             res = run_ga(sub, pp, gp, time_limit=budget, progress=prog, cancelled=cancelled)
             best, baseline = res.decoded, res.baseline
+            lbh = res.lower_bound.get("hojas", 0)
             ginfo = {"generaciones": res.generations, "tiempo_s": round(res.elapsed, 2),
                      "criterio_parada": res.stop_reason, "evaluaciones": res.evaluations,
-                     "historial": res.history}
+                     "historial": res.history, "cota_hojas": lbh,
+                     "piezas_grandes": res.lower_bound.get("grandes", 0),
+                     "optimo_demostrado": bool(lbh) and len(best.bins) <= lbh and
+                     len(best.unplaced) <= len(sub.pieces) - res.lower_bound.get("piezas_colocables", 0)}
         else:
             seed = seed_chromosomes(sub, pp.tolerance_window)[0]
             best = baseline = dec.decode(seed, finalize=True)
+            lb = dec.sheet_lower_bound() if sub.lots else {}
             ginfo = {"generaciones": 0, "tiempo_s": 0.0, "criterio_parada": "heuristica",
-                     "evaluaciones": 1, "historial": [round(best.fitness, 6)]}
+                     "evaluaciones": 1, "historial": [round(best.fitness, 6)],
+                     "cota_hojas": lb.get("hojas", 0), "piezas_grandes": lb.get("grandes", 0),
+                     "optimo_demostrado": False}
         done_pieces += len(sub.pieces)
 
         mo, mb = _metrics(dec, best), _metrics(dec, baseline)
